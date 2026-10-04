@@ -257,7 +257,11 @@ class Model {
   stageFailures: string[] = [];
   pagesBuilt = false;
 
-  constructor(private unitTitles: Record<string, string> = {}) {}
+  /** `fix`: only the demo being fixed matters — ignore the unit's full demo list and never show "planning…". */
+  constructor(
+    private unitTitles: Record<string, string> = {},
+    private fix = false,
+  ) {}
 
   unit(id: string): UnitState {
     let u = this.units.get(id);
@@ -301,6 +305,7 @@ class Model {
         return;
       }
       case "plan": {
+        if (this.fix) return;
         const u = this.unit(e.unit);
         for (const d of e.demos) {
           const prev = u.demos.get(d.id);
@@ -354,6 +359,7 @@ class Model {
   }
 
   allPlanned() {
+    if (this.fix) return true;
     return [...this.units.values()].every((u) => isDone(u.stages.get("plan")!) || u.stages.get("plan")!.status === "error");
   }
 
@@ -461,7 +467,7 @@ class PlainUi implements Ui {
   private lastLine = Date.now();
 
   constructor(private opts: UiOptions) {
-    this.m = new Model(opts.unitTitles);
+    this.m = new Model(opts.unitTitles, !!opts.fix);
     this.m.pagesBuilt = !!opts.pagesReady;
     // Long stages stay audible: a "still …" line every 30 s of silence.
     this.beat = setInterval(() => {
@@ -571,7 +577,7 @@ class LiveUi implements Ui {
   private stopKeys: () => void;
 
   constructor(private opts: UiOptions) {
-    this.m = new Model(opts.unitTitles);
+    this.m = new Model(opts.unitTitles, !!opts.fix);
     this.m.pagesBuilt = !!opts.pagesReady;
     process.stdout.write("\x1b[?25l");
     this.timer = setInterval(() => this.draw(), 80);
@@ -806,9 +812,10 @@ class LiveUi implements Ui {
     const budget = () => rows - head.length - body.length - tail.length - foot.length;
     if (units.length === 1) {
       const u = units[0];
-      body.push(...this.prepLines(u, width));
+      const prep = this.prepLines(u, width);
+      body.push(...prep);
       if (u.demos.size) {
-        body.push("");
+        if (prep.length || body.length) body.push(""); // no double gap when nothing sits above the demos (fix runs)
         body.push(...this.demoRows(u, width, budget()));
       }
     } else if (units.length > 1) {

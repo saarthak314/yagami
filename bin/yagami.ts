@@ -45,9 +45,10 @@ const USAGE = [
 
 const HELP = `\n${BRAND}\n\n${USAGE}\n`;
 
-function fail(msg: string): never {
+/** Print one error line and exit. `spaced` adds a blank line before it (skip it right after a screen that already ends with one). */
+function fail(msg: string, spaced = true): never {
   if (process.stdout.isTTY) process.stdout.write("\x1b[?25h");
-  console.error(paint(`\n  ${color.red("✗")} ${msg}\n`));
+  console.error(paint(`${spaced ? "\n" : ""}  ${color.red("✗")} ${msg}\n`));
   process.exit(1);
 }
 
@@ -160,11 +161,12 @@ async function run(spec: RunSpec) {
   // The URL is printed once: by the serving line, or here when there's nothing to serve.
   ui.finish();
   process.removeListener("SIGINT", quit);
-  await serveUntilQuit(url, site!);
+  await serveUntilQuit(url, site!, true);
 }
 
-async function serveUntilQuit(url: string, site: Site) {
-  if (!site.up) fail(`can't serve the site: ${site.error ?? "it did not start"} — free port 5190, then run: yagami`);
+async function serveUntilQuit(url: string, site: Site, afterRun = false) {
+  // After a run the screen already shows why (a quiet note), so don't repeat the reason.
+  if (!site.up) fail(`can't serve the site${afterRun ? "" : `: ${site.error ?? "it did not start"}`} — free port 5190, then run: yagami`, false);
   openUrl(url);
   if (!site.owned) {
     console.log(`  ${color.accent("→")} ${color.fg(`already open at ${url}`)}\n    ${color.dim("another yagami is serving it")}\n`);
