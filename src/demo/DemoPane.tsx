@@ -4,6 +4,7 @@
 import { Component, Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import type { ControlSpec, DemoProps, Params, ParamValue } from "../types";
 import { loaderFor, type BeatRef } from "../lib/data";
+import { templateComponent } from "./templates";
 import { Inline } from "../lib/inline";
 import { ChevronLeft, ChevronRight, Collapse, Expand, Locate, Pin } from "../ui/icons";
 
@@ -143,7 +144,9 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
     return () => ro.disconnect();
   }, []);
 
-  const Demo = lazyComponent(unitKey, demo.component);
+  // Template demos render a library component with their config; others load their generated file.
+  const Template = demo.template ? templateComponent(demo.template) : null;
+  const Demo = demo.template ? null : lazyComponent(unitKey, demo.component);
   // Demos are laid out for at least STAGE_MIN px; narrower stages render at that width and scale down.
   const scale = size.w > 0 && size.w < STAGE_MIN ? size.w / STAGE_MIN : 1;
   const logical = { w: Math.round(size.w / scale), h: Math.round(size.h / scale) };
@@ -162,21 +165,36 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
           {size.w > 0 && size.h > 0 && (
             <div className="stage-scale" style={scale < 1 ? { width: logical.w, height: logical.h, transform: `scale(${scale})` } : undefined}>
             <DemoBoundary key={`${demo.id}`} onError={onError}>
-              {Demo ? (
+              {Demo || Template ? (
                 <Suspense fallback={<div className="skel stage-skel" aria-label="loading the demo" />}>
-                  <Demo
-                    params={params}
-                    preset={preset?.id ?? ""}
-                    playing={playing}
-                    resetKey={resetKey}
-                    width={logical.w}
-                    height={logical.h}
-                    setReadouts={setReadouts}
-                  />
+                  {Template ? (
+                    <Template
+                      config={demo.config}
+                      params={params}
+                      preset={preset?.id ?? ""}
+                      playing={playing}
+                      resetKey={resetKey}
+                      width={logical.w}
+                      height={logical.h}
+                      setReadouts={setReadouts}
+                    />
+                  ) : (
+                    Demo && (
+                      <Demo
+                        params={params}
+                        preset={preset?.id ?? ""}
+                        playing={playing}
+                        resetKey={resetKey}
+                        width={logical.w}
+                        height={logical.h}
+                        setReadouts={setReadouts}
+                      />
+                    )
+                  )}
                   <ReadySignal onReady={onReady} />
                 </Suspense>
               ) : (
-                <MissingDemo onError={onError} name={demo.component} />
+                <MissingDemo onError={onError} name={demo.template ? `template "${demo.template}"` : demo.component} />
               )}
             </DemoBoundary>
             </div>

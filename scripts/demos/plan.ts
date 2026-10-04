@@ -13,7 +13,8 @@ import { z } from "zod";
 import type Anthropic from "@anthropic-ai/sdk";
 import { call, MODELS, textOf, type Effort } from "../lib/claude";
 import type { BookConfig, ControlSpec, DemoPlan, DemoSpec, Expectation, Params, ParamValue } from "../../src/types";
-import { anchorLine, type Ctx, extractJson, loadCtx, log, pageImage, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
+import { anchorLine, type Ctx, extractJson, loadCtx, log, pageImage, paths, pngBlock, setSpecSink, tag, textSourceNote, writeJson } from "./common";
+import { outlineCatalog as catalogText, templates as loadTemplates } from "./template";
 import { domainOf } from "./domains";
 
 // --- Schema (mirrors DemoPlan in src/types.ts) ------------------------------
@@ -482,6 +483,8 @@ export interface OutlineDemo {
   idea: string;
   readouts: { id: string; label: string; measures: string }[];
   beats: { anchor: string; focus: string }[];
+  /** A template id from the catalog when the demo is a template config; absent = custom code. */
+  template?: string;
 }
 
 const OutlineDemoZ = z.object({
@@ -491,14 +494,20 @@ const OutlineDemoZ = z.object({
   idea: z.string(),
   readouts: z.array(z.object({ id: z.string(), label: z.string(), measures: z.string().optional().default("") })),
   beats: z.array(z.object({ anchor: z.string(), focus: z.string().optional().default("") })),
+  template: z.string().optional(),
 });
+
+/** YAGAMI_TEMPLATES=off: every demo is generated as code (A/B benchmarks, debugging). */
+export function templatesOff(): boolean {
+  return process.env.YAGAMI_TEMPLATES === "off";
+}
 
 /** The legacy planner when YAGAMI_PLANNER=legacy (kept for A/B benchmarks). */
 export function legacyPlanner(): boolean {
   return process.env.YAGAMI_PLANNER === "legacy";
 }
 
-function outlineSystem(book: BookConfig): string {
+function outlineSystem(book: BookConfig, catalog: string): string {
   const d = domainOf(book.domain);
   const noun = unitNoun(book);
   const src = textSourceNote(book);
@@ -516,7 +525,14 @@ Each demo has 2–6 beats in reading order; a beat anchors to one paragraph, equ
 
 Complexity budget: each demo is ONE idea that fits a compact component (≈200 lines): one scene, at most ~4 controls and 4 readouts, presets that vary parameters of the same scene rather than switching between different scenes. If an idea needs several scenes, comparisons of many strategies or a big simulation, split it into separate demos or drop it.
 
-Keep the outline short — the detail comes later. Write in your own words. Reply with only this JSON (demos in reading order):
+${
+    catalog
+      ? `Ready-made templates. When a demo's idea fits one of these well, mark it with that template id: it is then configured instead of coded (faster, cheaper, already tested). Never force a poor fit — a demo that needs a custom scene, interaction or drawing is "custom".
+${catalog}
+
+`
+      : ""
+  }Keep the outline short — the detail comes later. Write in your own words. Reply with only this JSON (demos in reading order):
 
 { "demos": [ {
   "id": "kebab-case",
@@ -524,13 +540,16 @@ Keep the outline short — the detail comes later. Write in your own words. Repl
   "component": "PascalCase, unique",
   "idea": "≤ 40 words: what is drawn, what the reader manipulates, which figure it re-draws if any",
   "readouts": [ { "id": "camelCase", "label": "short, may use $LaTeX$", "measures": "≤ 15 words" } ],
-  "beats": [ { "anchor": "<anchor id>", "focus": "≤ 20 words: what this beat shows, with the text's numbers" } ]
+  "beats": [ { "anchor": "<anchor id>", "focus": "≤ 20 words: what this beat shows, with the text's numbers" } ]${catalog ? `,
+  "template": "<template id> or custom"` : ""}
 } ] }`;
 }
 
 /** Normalise one outlined demo against the unit and the demos accepted so far. Returns problems (empty = ok). */
-function fixOutline(o: OutlineDemo, c: Ctx, state: PlanState): string[] {
+function fixOutline(o: OutlineDemo, c: Ctx, state: PlanState, templateIds: Set<string> = new Set()): string[] {
   const errs: string[] = [];
+  // Unknown or "custom" template marks mean the code path.
+  if (o.template !== undefined && !templateIds.has(o.template)) delete o.template;
   const anchors = c.unit.anchors;
   const order = new Map(anchors.map((a, i) => [a.id, i]));
   o.id = o.id.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "demo";
@@ -564,6 +583,8 @@ function fixOutline(o: OutlineDemo, c: Ctx, state: PlanState): string[] {
 
 export interface OutlineOpts {
   effort?: Effort;
+  /** false: never mark demos as templates (YAGAMI_TEMPLATES=off does the same). */
+  templates?: boolean;
   /** Called for each outlined demo the moment it is accepted. */
   onDemo?: (o: OutlineDemo) => void;
 }
@@ -592,17 +613,19 @@ export async function planOutline(book: BookConfig, unitId: string, opts: Outlin
 
   const state: PlanState = { ids: new Set(), components: new Set(), anchors: new Set() };
   const demos: OutlineDemo[] = [];
+  const catalog = opts.templates === false || templatesOff() ? [] : await loadTemplates();
+  const templateIds = new Set(catalog.map((x) => x.id));
   const consider = (raw: unknown) => {
     const parsed = OutlineDemoZ.safeParse(raw);
     if (!parsed.success || demos.length >= 7) return;
     const o = parsed.data as OutlineDemo;
-    const errs = fixOutline(o, c, state);
+    const errs = fixOutline(o, c, state, templateIds);
     if (errs.length) return log(`outline ${t}: dropped ${o.id}: ${errs.join("; ")}`);
     state.ids.add(o.id);
     state.components.add(o.component);
     for (const b of o.beats) state.anchors.add(b.anchor);
     demos.push(o);
-    log(`outline ${t}: + ${o.id} (${o.beats.length} beats)`);
+    log(`outline ${t}: + ${o.id} (${o.beats.length} beats${o.template ? `, template ${o.template}` : ""})`);
     opts.onDemo?.(o);
   };
   const scanner = new DemoScanner((json) => {
@@ -616,7 +639,7 @@ export async function planOutline(book: BookConfig, unitId: string, opts: Outlin
     model: MODELS.opus,
     effort: opts.effort ?? planEffort(),
     label: `plan:${t}`,
-    system: outlineSystem(book),
+    system: outlineSystem(book, templateIds.size ? await catalogText() : ""),
     messages: [{ role: "user", content }],
     maxTokens: 16000,
     onText: (d) => scanner.push(d),
@@ -664,6 +687,8 @@ export class PlanAssembler {
   ) {
     this.c = loadCtx(book, unitId);
     this.out = out ?? paths.plan(book.slug, unitId);
+    // The real plan's assembler owns plan.json until finish(); scratch assemblers don't.
+    if (!out) setSpecSink(book.slug, unitId, (spec) => this.accept(spec));
     this.order = new Map(this.c.unit.anchors.map((a, i) => [a.id, i]));
     const bookText = Object.values(this.c.text.text).join(" \n ");
     const captionRuns = shingles(bookText, 9);
@@ -731,6 +756,7 @@ export class PlanAssembler {
     const demos = this.specs();
     if (!demos.length) throw new Error(`plan ${tag(this.book.slug, this.unitId)}: no usable demos`);
     this.write();
+    setSpecSink(this.book.slug, this.unitId, null);
     return { book: this.book.slug, unit: this.unitId, demos };
   }
 }

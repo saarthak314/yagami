@@ -9,9 +9,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { call, type Effort, MODELS, pool, prewarm, textOf } from "../lib/claude";
-import type { Anchor, BookConfig, Domain, DemoSpec } from "../../src/types";
+import type { Anchor, BookConfig, Domain, DemoSpec, Expectation } from "../../src/types";
 import { loadBook } from "../books";
-import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
+import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, specSink, tag, textSourceNote, writeJson } from "./common";
 import { emit } from "../lib/report";
 import { domainOf } from "./domains";
 import type { OutlineDemo, PlanAssembler } from "./plan";
@@ -25,6 +25,8 @@ export interface Convo {
   messages: Anthropic.Beta.BetaMessageParam[];
   /** Effort of every builder turn in this conversation (part of the cached prefix; default medium). */
   effort?: Effort;
+  /** "template": the demo is a template config (scripts/demos/template.ts), not a component file. */
+  kind?: "code" | "template";
 }
 
 /** Builder effort for demos made from an outline (YAGAMI_BUILD_EFFORT, default low). */
@@ -181,7 +183,7 @@ Reply with exactly two fenced blocks and nothing else: first \`\`\`json with the
  * anchor whose text names a figure the brief mentions ("Fig. 13-3",
  * "Figure 2", "Table 1"). Dark on light.
  */
-async function bookImages(c: Ctx, spec: Pick<DemoSpec, "brief" | "beats">): Promise<Anthropic.Beta.BetaContentBlockParam[]> {
+export async function bookImages(c: Ctx, spec: Pick<DemoSpec, "brief" | "beats">): Promise<Anthropic.Beta.BetaContentBlockParam[]> {
   // Figure numbers the brief names: "Fig. 13-3", "Figure 2", "Table 1".
   const figs = new Set([...spec.brief.matchAll(/\b(Fig(?:ure|s?\.)?|Table)\s*(\d+(?:[-–.]\d+)?)/g)].map((m) => `${m[1].startsWith("T") ? "Table" : "Fig"} ${m[2].replace("–", "-")}`));
   const wanted: { anchor: Anchor; why: string }[] = [];
@@ -263,13 +265,58 @@ export async function typecheck(slug: string, unit: string, file: string): Promi
 
 // --- Conversation loop ----------------------------------------------------------
 
-function saveConvo(c: Convo) {
+export function saveConvo(c: Convo) {
   writeJson(paths.convo(c.book, c.unit, c.spec.id), c);
 }
 
 export function loadConvo(slug: string, unit: string, id: string): Convo | null {
   const f = paths.convo(slug, unit, id);
   return fs.existsSync(f) ? (JSON.parse(fs.readFileSync(f, "utf8")) as Convo) : null;
+}
+
+/**
+ * A fix reply may correct the spec's expectations (when the text supports the readout rather than
+ * the expected value): a fenced ```json block `{ "expect": [...] }` with the full corrected list,
+ * entries `{ beat | anchor, readout, value, tol? }`. Applied to the convo spec and plan.json.
+ * Returns true when a valid patch was applied.
+ */
+export function applyExpectPatch(convo: Convo, text: string): boolean {
+  const m = [...text.matchAll(/```json\s*\n([\s\S]*?)\n```/g)].map((x) => x[1]).find((b) => /"expect"\s*:/.test(b));
+  if (!m) return false;
+  let raw: unknown;
+  try {
+    raw = (JSON.parse(m) as { expect?: unknown }).expect;
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(raw)) return false;
+  const spec = convo.spec;
+  const readouts = new Set(spec.readouts.map((r) => r.id));
+  const out: Expectation[] = [];
+  for (const e of raw as { beat?: unknown; anchor?: unknown; readout?: unknown; value?: unknown; tol?: unknown }[]) {
+    if (!e || typeof e !== "object") continue;
+    const beat = typeof e.anchor === "string" ? spec.beats.findIndex((b) => b.anchor === e.anchor) : typeof e.beat === "number" && Number.isInteger(e.beat) && e.beat >= 0 && e.beat < spec.beats.length ? e.beat : -1;
+    const value = typeof e.value === "number" ? e.value : typeof e.value === "string" ? Number(e.value.replace(/[,\s]/g, "")) : NaN;
+    if (beat < 0 || typeof e.readout !== "string" || !readouts.has(e.readout) || !Number.isFinite(value)) continue;
+    const tol = typeof e.tol === "number" && e.tol >= 0 && e.tol <= 1 ? e.tol : undefined;
+    out.push({ beat, readout: e.readout, value, ...(tol !== undefined ? { tol } : {}) });
+  }
+  if (out.length) spec.expect = out;
+  else delete spec.expect;
+  saveSpec(convo.book, convo.unit, spec);
+  log(`build ${tag(convo.book, convo.unit)} ${spec.id}: expectations corrected (${out.length})`);
+  return true;
+}
+
+/** Replace one demo's spec in plan.json. */
+export function saveSpec(slug: string, unit: string, spec: DemoSpec) {
+  const sink = specSink(slug, unit);
+  if (sink) return sink(spec);
+  const file = paths.plan(slug, unit);
+  if (!fs.existsSync(file)) return;
+  const plan = loadPlan(slug, unit);
+  plan.demos = plan.demos.map((d) => (d.id === spec.id ? spec : d));
+  writeJson(file, plan);
 }
 
 /**
@@ -302,8 +349,14 @@ export async function runConvo(convo: Convo, rounds = 4, phase: "building" | "re
     const { message, text } = reply;
     convo.messages.push({ role: "assistant", content: message.content });
     const current = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+    const patched = editing && applyExpectPatch(convo, text);
     const edited = current ? applyEdits(current, text) : null;
     const code = edited && "code" in edited ? edited.code : codeOf(text);
+    if (code === null && patched && current) {
+      // Only the expectations were wrong: the file stays as it is.
+      saveConvo(convo);
+      return true;
+    }
     if (code === null) {
       const why = edited && "error" in edited ? edited.error : "the reply had no code";
       log(`build ${t} ${spec.id}: ${why} (round ${round})`);
@@ -469,7 +522,8 @@ export async function buildUnit(book: BookConfig, unitId: string, opts: { only?:
   const c = loadCtx(book, unitId);
   const t = tag(book.slug, unitId);
   const plan = loadPlan(book.slug, unitId);
-  const demos = plan.demos.filter((d) => !opts.only?.length || opts.only.includes(d.id));
+  // Template demos have no component to build (their config is the artefact).
+  const demos = plan.demos.filter((d) => !d.template && (!opts.only?.length || opts.only.includes(d.id)));
   log(`build ${t}: ${demos.length} demos`);
   const results = await pool(demos, opts.concurrency ?? 4, async (spec) => {
     try {
@@ -493,6 +547,7 @@ export async function reviseDemo(book: BookConfig, unitId: string, id: string, n
   const plan = loadPlan(book.slug, unitId);
   const spec = plan.demos.find((d) => d.id === id);
   if (!spec) throw new Error(`${t}: no demo "${id}" in plan`);
+  if (spec.template) throw new Error(`${t}: "${id}" is a template demo — revise its config (template.ts reviseTemplate)`);
   const convo = loadConvo(book.slug, unitId, id);
   if (!convo) throw new Error(`${t}: no build conversation for "${id}" — run build first`);
   const file = paths.component(book.slug, unitId, spec.component);

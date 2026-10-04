@@ -190,6 +190,13 @@ export interface DemoSpec {
   beats: Beat[];
   /** Numeric values the text pins down, checked against the rendered readouts (no model needed). */
   expect?: Expectation[];
+  /**
+   * Id of a template from src/demo/templates/catalog.ts. When set, the app renders that template with
+   * `config` and `component` is ignored (no generated file is needed).
+   */
+  template?: string;
+  /** The template's config, validated by the catalog entry's `validate`. */
+  config?: unknown;
 }
 
 /** A readout value the demo must show at a beat (verified deterministically after the stage settles). */

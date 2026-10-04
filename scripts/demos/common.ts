@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import sharp, { type Sharp } from "sharp";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Anchor, BookConfig, DemoPlan, Unit, UnitText } from "../../src/types";
+import type { Anchor, BookConfig, DemoPlan, DemoSpec, Unit, UnitText } from "../../src/types";
 import { publicBookDir, unitJsonPath, unitTextPath, workDir } from "../books";
 import { info } from "../lib/report";
 
@@ -142,3 +142,19 @@ export function extractJson(text: string): unknown {
 
 /** Info line through the event sink (the CLI decides how to show it). */
 export const log = (...args: unknown[]) => info(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+
+/**
+ * While a plan is being assembled (outline run), plan.json is owned by its PlanAssembler: spec
+ * changes made mid-run (fix turns, config edits) must go through it, or its next write would
+ * revert them. The assembler registers here; `saveSpec` (build.ts) uses it when present.
+ */
+const specSinks = new Map<string, (spec: DemoSpec) => void>();
+
+export function setSpecSink(slug: string, unit: string, sink: ((spec: DemoSpec) => void) | null) {
+  if (sink) specSinks.set(tag(slug, unit), sink);
+  else specSinks.delete(tag(slug, unit));
+}
+
+export function specSink(slug: string, unit: string): ((spec: DemoSpec) => void) | undefined {
+  return specSinks.get(tag(slug, unit));
+}

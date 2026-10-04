@@ -18,7 +18,7 @@ import { callJson, MODELS, pool } from "../lib/claude";
 import { Limit } from "../lib/limit";
 import { emit } from "../lib/report";
 import type { BookConfig, DemoSpec, Expectation } from "../../src/types";
-import { loadConvo, runConvo } from "./build";
+import { loadConvo, runConvo, saveSpec } from "./build";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
 import { domainOf } from "./domains";
 
@@ -52,6 +52,8 @@ export interface DemoResult {
   rounds: number;
   pass: boolean;
   beats: BeatResult[];
+  /** Non-fatal notes, e.g. expectations dropped because they disagreed with a reviewed demo. */
+  warnings?: string[];
 }
 
 const ReviewSchema = z.object({
@@ -648,6 +650,11 @@ function checkFeedback(notes: string[], check: CheckResult, from: "checks" | "re
       ? "The demo was rendered in a headless browser (560×760 viewport) and checked automatically. These problems were found:"
       : "The demo was rendered in a headless browser and reviewed. The reviewer found:";
   const content: Anthropic.Beta.BetaContentBlockParam[] = [{ type: "text", text: `${lead}\n\n${notes.map((n) => `- ${n}`).join("\n")}` }];
+  if (notes.some(isExpectNote))
+    content.push({
+      type: "text",
+      text: 'An expected value comes from your spec, not from the checker. Re-check it against the text: if the readout is right and the expectation is wrong, correct the expectation instead of the code — add a ```json block {"expect": [{ "beat": <index>, "readout": "<id>", "value": <number>, "tol"?: <relative> }, …]} with the full corrected list (and no code if nothing else needs fixing).',
+    });
   if (check.sheet && fs.existsSync(check.sheet)) content.push({ type: "text", text: "All beats as rendered:" }, pngBlock(fs.readFileSync(check.sheet)));
   content.push({ type: "text", text: 'Fix every problem (keep everything else as it is) and reply with the complete corrected file in one ```tsx block.' });
   return { role: "user", content };
@@ -665,7 +672,35 @@ function toResults(check: CheckResult, pass: boolean, issues: string[]): BeatRes
  * rounds are spent; then one contact-sheet model review (`review: false` skips it)
  * with at most one revision round on its findings. Same result shape as verifyDemo.
  */
-export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, opts: { rounds?: number; review?: boolean } = {}): Promise<DemoResult> {
+/** A deterministic note about an expected readout value (grouped form: "beat(s) …: readout … shows …, the text gives …"). */
+function isExpectNote(n: string): boolean {
+  return /readout .* shows .*, the text gives /.test(n);
+}
+
+/** Expectations named by expect-mismatch notes (beats + readout id), to drop on the last round. */
+function mismatchedExpectations(demo: DemoSpec, notes: string[]): Expectation[] {
+  const out: Expectation[] = [];
+  for (const n of notes) {
+    const m = /^beats? ([\d,]+): readout .*\((\w+)\) shows /.exec(n);
+    if (!m) continue;
+    const beats = new Set(m[1].split(",").map(Number));
+    for (const e of demo.expect ?? []) if (e.readout === m[2] && beats.has(e.beat)) out.push(e);
+  }
+  return out;
+}
+
+export interface CheckedOpts {
+  rounds?: number;
+  /** false: skip the model review (deterministic checks only). */
+  review?: boolean;
+  /**
+   * Custom fix step instead of the code conversation (template demos edit their config):
+   * returns the updated spec, or null when nothing usable came back.
+   */
+  fix?: (notes: string[], check: CheckResult, from: "checks" | "review", round: number) => Promise<DemoSpec | null>;
+}
+
+export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, opts: CheckedOpts = {}): Promise<DemoResult> {
   const rounds = opts.rounds ?? 2;
   const slug = c.book.slug;
   const unit = c.unit.unit;
@@ -675,20 +710,45 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
   let round = 0;
   let results: BeatResult[] = [];
   let reviewed = false;
+  const warnings: string[] = [];
+  /** Expectations were dropped on the last round: the model review decides instead. */
+  let dropped = false;
   try {
     for (; ; round++) {
       emit({ type: "demo", unit, id: demo.id, phase: "verifying", round, beats: demo.beats.length });
       const check = await checkDemo(env, c, demo, outDir);
+      // Last round, and the only problems left are expected values: a wrong expectation must not
+      // sink a demo that is otherwise fine. Drop those expectations and let the review decide.
+      if (!check.ok && round >= rounds && check.notes.length && check.notes.every(isExpectNote)) {
+        const bad = new Set(mismatchedExpectations(demo, check.notes));
+        if (bad.size) {
+          demo = { ...demo, expect: (demo.expect ?? []).filter((e) => !bad.has(e)) };
+          if (!demo.expect?.length) delete demo.expect;
+          saveSpec(slug, unit, demo);
+          for (const n of check.notes) warnings.push(`expectation dropped: ${n}`);
+          log(`verify ${t} ${demo.id}: dropped ${bad.size} expectation(s) that disagree with the demo; reviewing instead`);
+          dropped = true;
+          check.ok = true;
+          check.notes = [];
+        }
+      }
       if (!check.ok) {
         log(`verify ${t} ${demo.id}: round ${round}: ${check.notes.length} check notes`);
         results = toResults(check, false, check.notes);
+        if (opts.fix) {
+          const next = round < rounds ? await opts.fix(check.notes, check, "checks", round + 1) : null;
+          if (!next) break;
+          demo = next;
+          continue;
+        }
         const convo = round < rounds ? loadConvo(slug, unit, demo.id) : null;
         if (!convo) break;
         convo.messages.push(checkFeedback(check.notes, check, "checks"));
         await runConvo(convo, 3, "revising", round + 1);
+        demo = convo.spec; // a fix turn may have corrected the spec's expectations
         continue;
       }
-      if (opts.review === false || reviewed) {
+      if ((opts.review === false && !dropped) || reviewed) {
         results = toResults(check, true, []);
         break;
       }
@@ -697,6 +757,12 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
       log(`verify ${t} ${demo.id}: round ${round}: checks pass, review ${r.pass ? "pass" : `fail (${r.issues.length})`}`);
       results = toResults(check, r.pass, r.issues);
       if (r.pass) break;
+      if (opts.fix) {
+        const next = round < rounds ? await opts.fix(r.issues, check, "review", round + 1) : null;
+        if (!next || JSON.stringify(next) === JSON.stringify(demo)) break;
+        demo = next;
+        continue;
+      }
       const convo = round < rounds ? loadConvo(slug, unit, demo.id) : null;
       if (!convo) break;
       // One revision on the review's findings; the next round re-checks deterministically, and a
@@ -704,6 +770,7 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
       const before = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
       convo.messages.push(checkFeedback(r.issues, check, "review"));
       await runConvo(convo, 3, "revising", round + 1);
+      demo = convo.spec;
       if (before !== null && fs.existsSync(file) && fs.readFileSync(file, "utf8") === before) break;
     }
   } catch (e) {
@@ -713,7 +780,7 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
   const passed = results.filter((r) => r.pass).length;
   const pass = results.length > 0 && passed === results.length;
   emit({ type: "demo", unit, id: demo.id, phase: pass ? "pass" : "fail", round, beatsPassed: passed, beats: results.length, detail: pass ? undefined : results.find((r) => !r.pass)?.issues[0] });
-  return { id: demo.id, component: demo.component, rounds: round, pass, beats: results };
+  return { id: demo.id, component: demo.component, rounds: round, pass, beats: results, ...(warnings.length ? { warnings } : {}) };
 }
 
 /** Merge results into work/<slug>/verify/<unit>/report.json (keeps other demos of the current plan). */

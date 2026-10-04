@@ -18,10 +18,11 @@ import { Limit } from "./lib/limit";
 import { emit, setEmit } from "./lib/report";
 import { assembleUnit, assembleVariants, anchorUnit, renderUnit } from "./content/index";
 import { fileHash, hash, readCache, updateCache } from "./demos/cache";
-import { loadCtx, loadPlan, paths } from "./demos/common";
+import { loadCtx, loadPlan, paths, setSpecSink } from "./demos/common";
 import { buildDemo, buildEffort, generateDemo, loadConvo, reviseDemo, warmBuilder } from "./demos/build";
 import { legacyPlanner, type OutlineDemo, PlanAssembler, PLAN_KEY_PREFIX, planInputHash, planOutline, planUnit } from "./demos/plan";
-import { closeEnv, type DemoResult, previousVerdict, startEnv, type VerifyEnv, verifyDemoChecked, writeReport } from "./demos/verify";
+import { type CheckedOpts, closeEnv, type DemoResult, previousVerdict, startEnv, type VerifyEnv, verifyDemoChecked, writeReport } from "./demos/verify";
+import { generateTemplateDemo, reviseTemplate, skipsReview, templateArtifact, warmTemplates } from "./demos/template";
 
 export type { Stage };
 
@@ -241,19 +242,25 @@ async function runUnitDemos(
         const assembler = new PlanAssembler(book, unit, { demos: outlined });
         // Write the builder prompt to the cache while the outline streams (demos then only read it).
         if (doBuild) void warmBuilder(book, buildEffort());
-        await planOutline(book, unit, {
-          onDemo: (o) => {
-            outlined.push(o);
-            enqueueOutlined(o, assembler, outlined);
-          },
-        });
-        emit({ type: "stage", unit, stage: "plan", status: "done", detail: `${outlined.length} demos` });
-        emit({ type: "plan", unit, demos: outlined.map((o) => ({ id: o.id, title: o.title, beats: o.beats.length })) });
-        const outcomes = await Promise.all(tasks);
-        const plan = assembler.finish();
-        updateCache(slug, unit, (c) => void (c.plan = inputHash));
-        fs.rmSync(planBackup, { force: true });
-        return finishUnit(outcomes, plan.demos.length);
+        try {
+          await planOutline(book, unit, {
+            onDemo: (o) => {
+              // Warm the template prompt when the outline marks its first template demo.
+              if (o.template && doBuild) void warmTemplates(book);
+              outlined.push(o);
+              enqueueOutlined(o, assembler, outlined);
+            },
+          });
+          emit({ type: "stage", unit, stage: "plan", status: "done", detail: `${outlined.length} demos` });
+          emit({ type: "plan", unit, demos: outlined.map((o) => ({ id: o.id, title: o.title, beats: o.beats.length })) });
+          const outcomes = await Promise.all(tasks);
+          const plan = assembler.finish();
+          updateCache(slug, unit, (c) => void (c.plan = inputHash));
+          fs.rmSync(planBackup, { force: true });
+          return finishUnit(outcomes, plan.demos.length);
+        } finally {
+          setSpecSink(slug, unit, null);
+        }
       }
     }
   } else {
@@ -274,6 +281,7 @@ async function runUnitDemos(
 
 /** One demo: build (or reuse) → optional revise → verify (with fix rounds). */
 async function demoTask(book: BookConfig, unit: string, spec: DemoSpec, steps: Set<Stage>, opts: RunOpts, getEnv: () => Promise<VerifyEnv>): Promise<DemoOutcome> {
+  if (spec.template) return templateTask(book, unit, spec, steps, opts, getEnv);
   const slug = book.slug;
   const file = paths.component(slug, unit, spec.component);
   const specHash = hash(JSON.stringify(spec));
@@ -315,7 +323,8 @@ async function demoTask(book: BookConfig, unit: string, spec: DemoSpec, steps: S
       }
     }
     const result = await verifyDemoChecked(await getEnv(), loadCtx(book, unit), spec, { rounds: opts.rounds ?? 2 });
-    updateCache(slug, unit, (c) => void (c.demos[spec.id] = { ...c.demos[spec.id], code: fileHash(file), verified: result.pass }));
+    const final = currentSpec(slug, unit, spec);
+    updateCache(slug, unit, (c) => void (c.demos[spec.id] = { ...c.demos[spec.id], spec: hash(JSON.stringify(final)), code: fileHash(file), verified: result.pass }));
     return { id: spec.id, ok: result.pass, why: result.pass ? undefined : result.beats.find((b) => !b.pass)?.issues[0] ?? "verify failed", result };
   } catch (e) {
     emit({ type: "demo", unit, id: spec.id, phase: "fail", detail: (e as Error).message });
@@ -336,6 +345,15 @@ async function generatedTask(
 ): Promise<DemoOutcome> {
   const slug = book.slug;
   try {
+    if (o.template) {
+      const tg = await generateTemplateDemo(plan.c, o, plan, outlined);
+      if (tg.spec) {
+        updateCache(slug, unit, (c) => void (c.demos[tg.spec!.id] = { spec: hash(JSON.stringify(tg.spec)), code: artifactHash(slug, unit, tg.spec!), verified: false }));
+        return verifyTemplate(book, unit, tg.spec, steps, opts, getEnv, (s) => plan.accept(s));
+      }
+      // No valid config: this demo is built as code after all.
+      delete o.template;
+    }
     const g = await generateDemo(plan.c, o, plan, outlined);
     if (!g.spec) {
       emit({ type: "demo", unit, id: o.id, phase: "fail", detail: g.why });
@@ -353,12 +371,104 @@ async function generatedTask(
       return { id: spec.id, ok: true };
     }
     const result = await verifyDemoChecked(await getEnv(), plan.c, spec, { rounds: opts.rounds ?? 2 });
-    updateCache(slug, unit, (c) => void (c.demos[spec.id] = { ...c.demos[spec.id], code: fileHash(file), verified: result.pass }));
+    // Verification may have corrected the spec (expectations): cache the final one.
+    const final = plan.specs().find((d) => d.id === spec.id) ?? spec;
+    updateCache(slug, unit, (c) => void (c.demos[spec.id] = { spec: hash(JSON.stringify(final)), code: fileHash(file), verified: result.pass }));
     return { id: spec.id, ok: result.pass, why: result.pass ? undefined : (result.beats.find((b) => !b.pass)?.issues[0] ?? "verify failed"), result };
   } catch (e) {
     emit({ type: "demo", unit, id: o.id, phase: "fail", detail: (e as Error).message });
     return { id: o.id, ok: false, why: (e as Error).message };
   }
+}
+
+/** Cache key for what a demo renders: its component file, or a template demo's template + config. */
+function artifactHash(slug: string, unit: string, spec: DemoSpec): string | undefined {
+  const t = templateArtifact(spec);
+  return t ? hash(t) : fileHash(paths.component(slug, unit, spec.component));
+}
+
+/** A template demo from an existing plan: nothing to build; optional config fix (`yagami fix`); verify. */
+async function templateTask(book: BookConfig, unit: string, spec: DemoSpec, steps: Set<Stage>, opts: RunOpts, getEnv: () => Promise<VerifyEnv>): Promise<DemoOutcome> {
+  const slug = book.slug;
+  try {
+    let current = spec;
+    if (opts.note && opts.only?.includes(spec.id)) {
+      const next = await reviseTemplate(loadCtx(book, unit), current, opts.note, latestSheet(slug, unit, spec.id));
+      if (!next) {
+        emit({ type: "demo", unit, id: spec.id, phase: "fail", detail: "the config could not be fixed" });
+        return { id: spec.id, ok: false, why: "revise failed (config)" };
+      }
+      current = next;
+    }
+    if (!steps.has("verify")) {
+      emit({ type: "demo", unit, id: spec.id, phase: "pass", detail: "configured (not verified)" });
+      return { id: spec.id, ok: true };
+    }
+    const code = artifactHash(slug, unit, current);
+    const cached = readCache(slug, unit).demos[spec.id];
+    if (!opts.force && !opts.note) {
+      const adopted = cached?.code === undefined && previousVerdict(book, unit, spec.id) === true;
+      if ((cached?.verified && cached.code === code) || adopted) {
+        if (adopted) updateCache(slug, unit, (c) => void (c.demos[spec.id] = { ...c.demos[spec.id], code, verified: true }));
+        emit({ type: "demo", unit, id: spec.id, phase: "pass", beatsPassed: current.beats.length, beats: current.beats.length, detail: "unchanged" });
+        return { id: spec.id, ok: true };
+      }
+    }
+    return verifyTemplate(book, unit, current, steps, opts, getEnv);
+  } catch (e) {
+    emit({ type: "demo", unit, id: spec.id, phase: "fail", detail: (e as Error).message });
+    return { id: spec.id, ok: false, why: (e as Error).message };
+  }
+}
+
+/**
+ * Verify a template demo: deterministic checks; their notes (and a review's) become config-fix
+ * turns. No model review when every reader-checkable value is pinned by \`expect\`.
+ */
+async function verifyTemplate(
+  book: BookConfig,
+  unit: string,
+  spec: DemoSpec,
+  steps: Set<Stage>,
+  opts: RunOpts,
+  getEnv: () => Promise<VerifyEnv>,
+  save?: (s: DemoSpec) => void,
+): Promise<DemoOutcome> {
+  const slug = book.slug;
+  if (!steps.has("verify")) {
+    emit({ type: "demo", unit, id: spec.id, phase: "pass", detail: "configured (not verified)" });
+    return { id: spec.id, ok: true };
+  }
+  const c = loadCtx(book, unit);
+  let current = spec;
+  const checked: CheckedOpts = {
+    rounds: opts.rounds ?? 2,
+    review: !skipsReview(spec),
+    fix: async (notes, check, _from, round) => {
+      const next = await reviseTemplate(c, current, notes.map((n) => `- ${n}`).join("\n"), check.sheet || null, { save, round });
+      if (next) current = next;
+      return next;
+    },
+  };
+  const result = await verifyDemoChecked(await getEnv(), c, current, checked);
+  current = currentSpec(slug, unit, current);
+  updateCache(slug, unit, (cc) => void (cc.demos[current.id] = { spec: hash(JSON.stringify(current)), code: artifactHash(slug, unit, current), verified: result.pass }));
+  return { id: current.id, ok: result.pass, why: result.pass ? undefined : (result.beats.find((b) => !b.pass)?.issues[0] ?? "verify failed"), result };
+}
+
+/** A demo's spec as it stands now (the plan being assembled, else plan.json), after any mid-run corrections. */
+function currentSpec(slug: string, unit: string, spec: DemoSpec): DemoSpec {
+  try {
+    return loadPlan(slug, unit).demos.find((d) => d.id === spec.id) ?? spec;
+  } catch {
+    return spec;
+  }
+}
+
+/** The newest contact sheet of a demo, for a fix request. */
+function latestSheet(slug: string, unit: string, id: string): string | null {
+  const f = path.join(paths.verifyDir(slug, unit), `${id}-sheet.png`);
+  return fs.existsSync(f) ? f : null;
 }
 
 /** Hash of the content pipeline's source, so a change to the extractor re-runs it. */
