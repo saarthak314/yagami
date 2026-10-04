@@ -1,7 +1,8 @@
-// "?": keyboard shortcuts and the code theme used in demo listings.
+// "?": keyboard shortcuts and the site theme.
 
 import { useEffect, useRef, useState } from "react";
-import { codeThemes, getCodeTheme, setCodeTheme } from "../demo/kit";
+import { THEMES, type ThemeId } from "../theme/themes";
+import { savedTheme, setTheme } from "../theme/apply";
 
 const SHORTCUTS: [string, string][] = [
   ["j / k", "Next / previous step"],
@@ -19,7 +20,12 @@ const SHORTCUTS: [string, string][] = [
 ];
 
 export function HelpButton({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
-  const [theme, setTheme] = useState(() => getCodeTheme().name);
+  const [theme, setThemeState] = useState<ThemeId>(savedTheme);
+  useEffect(() => {
+    const on = (e: Event) => setThemeState((e as CustomEvent<ThemeId>).detail);
+    window.addEventListener("yagami:theme", on);
+    return () => window.removeEventListener("yagami:theme", on);
+  }, []);
   const wrap = useRef<HTMLDivElement>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -63,17 +69,10 @@ export function HelpButton({ open, onOpenChange }: { open: boolean; onOpenChange
             ))}
           </dl>
           <label className="popover-row">
-            <span>Code theme</span>
-            <select
-              className="select"
-              value={theme}
-              onChange={(e) => {
-                setCodeTheme(e.target.value);
-                setTheme(e.target.value);
-              }}
-            >
-              {Object.values(codeThemes).map((t) => (
-                <option key={t.name} value={t.name}>
+            <span>Theme</span>
+            <select className="select" value={theme} onChange={(e) => setTheme(e.target.value as ThemeId)}>
+              {THEMES.map((t) => (
+                <option key={t.id} value={t.id}>
                   {t.label}
                 </option>
               ))}

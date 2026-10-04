@@ -1,20 +1,13 @@
 // `#/`: the library. Continue where you left off, then every book with its chapters.
 
 import { useEffect, useState } from "react";
-import type { Domain, Library } from "../types";
+import type { Library } from "../types";
 import { assetUrl, isNumbered, loadUnit, planFor } from "../lib/data";
 import { LAST_BOOK, RESUME, load, progressKey, type Progress } from "../lib/store";
 import { hashFor } from "../lib/route";
 import { Inline } from "../lib/inline";
 import { Check, Copy } from "../ui/icons";
 import { Mark } from "../ui/Brand";
-
-const SUBJECT: Record<Domain, string> = {
-  math: "Mathematics",
-  cs: "Computer science",
-  ml: "Machine learning",
-  physics: "Physics",
-};
 
 const demoCount = (book: string, unit: string) => planFor(`${book}/${unit}`)?.demos.length ?? 0;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -155,7 +148,6 @@ export function LibraryView({ library, notFound }: { library: Library; notFound?
                     <span className="book-title">{b.title}</span>
                     {b.subtitle && !b.title.includes(b.subtitle) && <span className="book-sub">{b.subtitle}</span>}
                     <span className="book-meta">
-                      <span className="tag">{SUBJECT[b.domain] ?? b.domain}</span>
                       <span>{multi ? plural(b.units.length, "chapter") : "Paper"}</span>
                       <span>{plural(n, "demo")}</span>
                     </span>

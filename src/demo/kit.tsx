@@ -3,6 +3,7 @@
 // art on the dark stage, italic serif for physical symbols, mono for numbers.
 
 import { useEffect, useRef } from "react";
+import { THEMES, lineHighlight } from "../theme/themes";
 
 // ---------------------------------------------------------------------------
 // Theme
@@ -18,6 +19,8 @@ export const theme = {
   accent: "#52a8ff",
   /** Second accent for a contrasting quantity (e.g. U vs T). */
   accent2: "#f5a623",
+  /** Cell outlines and other quiet strokes, a step above grid. */
+  line: "#2e2e2e",
   fonts: {
     /** Physical symbols and variable names: m, g, F, ds, r₀ … */
     symbol: 'italic 15px "KaTeX_Math", "Times New Roman", serif',
@@ -313,7 +316,7 @@ export const draw = {
             kind: "mono",
             align: "center",
             size: Math.min(11, Math.floor(h * 0.45), Math.floor(w / 3.6)),
-            color: luminance(color) > 0.45 ? theme.bg : theme.fg,
+            color: contrastText(color),
           });
         }
       }
@@ -382,7 +385,7 @@ export const draw = {
     ctx.roundRect(left, y - height / 2, width, height, 5);
     ctx.fillStyle = o?.fill ?? theme.bg;
     ctx.fill();
-    ctx.strokeStyle = o?.active ? theme.accent : (o?.color ?? "#2e2e2e");
+    ctx.strokeStyle = o?.active ? theme.accent : (o?.color ?? theme.line);
     ctx.lineWidth = 1;
     ctx.stroke();
     draw.text(ctx, s, left + width / 2, y + 0.5, { kind, align: "center", size, color: o?.active ? theme.fg : (o?.color ?? theme.muted) });
@@ -415,7 +418,7 @@ export const draw = {
         ctx.globalAlpha = 1;
       }
       draw.rect(ctx, cx + 0.5, top + 0.5, size - 1, size - 1, {
-        color: st === "active" ? theme.accent : st === "muted" ? theme.grid : "#2e2e2e",
+        color: st === "active" ? theme.accent : st === "muted" ? theme.grid : theme.line,
         width: st === "active" ? 1.5 : 1,
       });
       const text = typeof v === "number" ? (o.format ?? String)(v) : v;
@@ -555,12 +558,22 @@ function mix(a: Rgb, b: Rgb, t: number): string {
 
 /** Near-background → accent. For magnitudes and probabilities. */
 export function sequential(t: number): string {
-  return mix([24, 24, 24], hexRgb(theme.accent), t);
+  const bg = hexRgb(theme.bg);
+  const fg = hexRgb(theme.fg);
+  const base = bg.map((v, i) => Math.round(v + (fg[i] - v) * 0.08)) as Rgb;
+  return mix(base, hexRgb(theme.accent), t);
 }
 
 /** accent2 (t = 0) → faint (t = 0.5) → accent (t = 1). For signed values. */
 export function diverging(t: number): string {
   return t < 0.5 ? mix(hexRgb(theme.accent2), hexRgb(theme.faint), t * 2) : mix(hexRgb(theme.faint), hexRgb(theme.accent), (t - 0.5) * 2);
+}
+
+/** Whichever of the theme's background and foreground reads better on `color`. */
+export function contrastText(color: string): string {
+  const l = luminance(color);
+  const ratio = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  return ratio(l, luminance(theme.bg)) >= ratio(l, luminance(theme.fg)) ? theme.bg : theme.fg;
 }
 
 /** Relative luminance (0..1) of "#rrggbb" or "rgb(r, g, b)". */
@@ -728,100 +741,25 @@ export interface CodeTheme {
   lineHighlight: string;
 }
 
-/** Colour schemes for code listings. "vercel" follows the Geist syntax palette. */
-export const codeThemes: Record<string, CodeTheme> = {
-  vercel: {
-    name: "vercel",
-    label: "Vercel",
-    colors: {
-      plain: "#ededed",
-      keyword: "#f75f8f",
-      type: "#52a8ff",
-      string: "#62c073",
-      number: "#52a8ff",
-      comment: "#8f8f8f",
-      function: "#c472fb",
-      operator: "#ededed",
-      punct: "#a1a1a1",
-      preproc: "#f75f8f",
-    },
-    lineHighlight: "rgba(82, 168, 255, 0.12)",
-  },
-  github: {
-    name: "github",
-    label: "GitHub Dark",
-    colors: {
-      plain: "#e6edf3",
-      keyword: "#ff7b72",
-      type: "#ffa657",
-      string: "#a5d6ff",
-      number: "#79c0ff",
-      comment: "#8b949e",
-      function: "#d2a8ff",
-      operator: "#ff7b72",
-      punct: "#c9d1d9",
-      preproc: "#ff7b72",
-    },
-    lineHighlight: "rgba(56, 139, 253, 0.15)",
-  },
-  rosepine: {
-    name: "rosepine",
-    label: "Rosé Pine",
-    colors: {
-      plain: "#e0def4",
-      keyword: "#31748f",
-      type: "#9ccfd8",
-      string: "#f6c177",
-      number: "#ebbcba",
-      comment: "#6e6a86",
-      function: "#ebbcba",
-      operator: "#908caa",
-      punct: "#908caa",
-      preproc: "#c4a7e7",
-    },
-    lineHighlight: "rgba(196, 167, 231, 0.12)",
-  },
-  mono: {
-    name: "mono",
-    label: "Monochrome",
-    colors: {
-      plain: "#ededed",
-      keyword: "#ffffff",
-      type: "#d4d4d4",
-      string: "#a1a1a1",
-      number: "#d4d4d4",
-      comment: "#5c5c5c",
-      function: "#ededed",
-      operator: "#a1a1a1",
-      punct: "#7c7c7c",
-      preproc: "#a1a1a1",
-    },
-    lineHighlight: "rgba(255, 255, 255, 0.07)",
-  },
-};
+/**
+ * Code colours follow the site theme (src/theme): one scheme per theme, keyed
+ * by theme id. "vercel" is kept as an alias of yagami dark for older callers.
+ */
+export const codeThemes: Record<string, CodeTheme> = Object.fromEntries(
+  THEMES.map((t) => [t.id, { name: t.id, label: t.label, colors: t.code, lineHighlight: lineHighlight(t) }]),
+);
+codeThemes.vercel = codeThemes["yagami-dark"];
 
-const CODE_THEME_KEY = "yagami.codeTheme";
-let currentCodeTheme = "vercel";
-try {
-  const saved = globalThis.localStorage?.getItem(CODE_THEME_KEY);
-  if (saved && codeThemes[saved]) currentCodeTheme = saved;
-} catch {
-  // storage unavailable (private mode / non-browser): keep the default
-}
+let currentCodeTheme: string = "yagami-dark";
 
-/** The reader's selected code theme (persisted; demos pick it up on the next frame). */
+/** The code colours of the current site theme. */
 export function getCodeTheme(): CodeTheme {
-  return codeThemes[currentCodeTheme] ?? codeThemes.vercel;
+  return codeThemes[currentCodeTheme] ?? codeThemes["yagami-dark"];
 }
 
+/** Switch code colours (the site theme calls this; demos never need to). */
 export function setCodeTheme(name: string): void {
-  if (!codeThemes[name]) return;
-  currentCodeTheme = name;
-  try {
-    globalThis.localStorage?.setItem(CODE_THEME_KEY, name);
-  } catch {
-    // ignore
-  }
+  if (codeThemes[name]) currentCodeTheme = name;
 }
 
 const KEYWORDS: Record<"c" | "js" | "python" | "go" | "rust" | "pseudo", string[]> = {

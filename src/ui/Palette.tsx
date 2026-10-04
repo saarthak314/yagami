@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Library } from "../types";
 import { search, searchIndex, type Target } from "../lib/search";
 import { Inline } from "../lib/inline";
+import { setTheme } from "../theme/apply";
 
 const LIMIT = 60;
 
@@ -32,7 +33,10 @@ export function Palette({
 
   const choose = (i: number) => {
     const r = results[i];
-    if (r) onGo(r.target);
+    if (r?.theme) {
+      setTheme(r.theme);
+      onClose();
+    } else if (r) onGo(r.target);
   };
 
   return (
@@ -59,7 +63,7 @@ export function Palette({
           aria-expanded="true"
           aria-autocomplete="list"
           aria-label="Search"
-          placeholder="Search books, chapters, sections and demos"
+          placeholder="Search books, chapters, sections, demos and themes"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {

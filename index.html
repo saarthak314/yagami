@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>yagami</title>
+    <script>
+      // Paint the saved theme's background before the app loads (no flash).
+      try {
+        var t = new URLSearchParams(location.search).get("demo") ? null : localStorage.getItem("yagami.theme");
+        var bg = { "yagami-light": "#ffffff", "gruvbox-dark": "#282828", "gruvbox-light": "#fbf1c7", "catppuccin-mocha": "#1e1e2e", "catppuccin-latte": "#eff1f5" }[t];
+        if (bg) {
+          document.documentElement.style.background = bg;
+          document.documentElement.style.colorScheme = /light|latte/.test(t) ? "light" : "dark";
+        }
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,6 +1,8 @@
-// Everything the command palette can jump to: books, chapters, sections and demos.
+// Everything the command palette can jump to: books, chapters, sections and
+// demos, plus the site themes.
 
 import type { Library } from "../types";
+import { THEMES, type ThemeId } from "../theme/themes";
 import { isNumbered, planFor } from "./data";
 
 export interface Target {
@@ -12,13 +14,15 @@ export interface Target {
 }
 
 export interface SearchItem {
-  kind: "Book" | "Chapter" | "Section" | "Demo";
+  kind: "Book" | "Chapter" | "Section" | "Demo" | "Theme";
   title: string;
   /** Where it lives, e.g. "Feynman Lectures · 13". */
   context: string;
   target: Target;
   /** Lower-cased text the query is matched against. */
   hay: string;
+  /** For "Theme" items: the theme to switch to. */
+  theme?: ThemeId;
 }
 
 export function searchIndex(lib: Library): SearchItem[] {
@@ -40,6 +44,7 @@ export function searchIndex(lib: Library): SearchItem[] {
       }
     }
   }
+  for (const t of THEMES) items.push({ kind: "Theme", title: `Theme: ${t.label}`, context: "", target: { book: "" }, hay: `theme ${t.label} ${t.dark ? "dark" : "light"}`.toLowerCase(), theme: t.id });
   return items;
 }
 
@@ -47,9 +52,9 @@ export function searchIndex(lib: Library): SearchItem[] {
 export function search(items: SearchItem[], query: string, near?: { book: string; unit?: string }): SearchItem[] {
   const q = query.trim().toLowerCase();
   const words = q.split(/\s+/).filter(Boolean);
-  const kindRank = { Demo: 0, Section: 1, Chapter: 2, Book: 3 } as const;
+  const kindRank = { Demo: 0, Section: 1, Chapter: 2, Book: 3, Theme: 4 } as const;
   const scored = items
-    .filter((it) => words.every((w) => it.hay.includes(w)))
+    .filter((it) => (it.kind !== "Theme" || words.length > 0) && words.every((w) => it.hay.includes(w)))
     .map((it) => {
       const t = it.title.toLowerCase();
       let score = 0;
