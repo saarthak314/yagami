@@ -10,9 +10,8 @@
 
 import type { BookConfig } from "../src/types";
 import type { PipelineEvent } from "./lib/events";
-import { defaultUnits, draftBook, finalizeBook } from "./create-book";
+import { defaultUnits, draftBook, startBook } from "./create-book";
 import { loadBook } from "./books";
-import { onCost } from "./lib/claude";
 import { runBook } from "./run";
 
 const args = new Map<string, string>();
@@ -26,11 +25,7 @@ const started = Date.now();
 let cost = 0;
 let finished = false;
 
-// Spend before the run (detecting the subject) is added to the run's own totals.
-let before = 0;
 const emit = (e: PipelineEvent) => {
-  if (e.type === "cost") e = { ...e, total: e.total + before };
-  if (e.type === "done") e = { ...e, cost: e.cost + before };
   if (e.type === "cost") cost = e.total;
   if (e.type === "done") finished = true;
   out(e);
@@ -51,19 +46,17 @@ if (!process.stdin.isTTY) {
 
 try {
   let book: BookConfig;
+  let domain: Promise<BookConfig["domain"]> | undefined;
   const pdf = args.get("pdf");
   if (pdf) {
     const draft = draftBook(pdf, { slug: args.get("slug") || undefined });
     book = draft.book;
     if (draft.fresh) {
-      // The one slow step before the pipeline: ask a model which subject this is.
+      // Ask a model which subject this is while the pages are prepared (its cost is
+      // counted by the run, which is already listening when the answer arrives).
       emit({ type: "stage", unit: "", stage: "init", status: "start", detail: "detecting the subject" });
-      const off = onCost((c) => (before += c));
-      await finalizeBook(pdf, book);
-      off();
-      cost = before;
-      if (before) out({ type: "cost", total: before });
-      emit({ type: "stage", unit: "", stage: "init", status: "done" });
+      ({ domain } = startBook(pdf, book));
+      void domain.then(() => emit({ type: "stage", unit: "", stage: "init", status: "done" }));
     }
   } else book = loadBook(args.get("book") ?? "");
 
@@ -72,7 +65,7 @@ try {
   const units = unitsArg ? unitsArg.split(",").filter(Boolean) : defaultUnits(book);
   const opts = demo
     ? { units: [args.get("unit") ?? ""], steps: ["verify" as const], only: [demo], note: args.get("note") ?? "" }
-    : { units };
+    : { units, domain };
   const result = await runBook(book.slug, opts, emit);
   process.exit(result.failures.length ? 1 : 0);
 } catch (e) {

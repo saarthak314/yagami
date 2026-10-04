@@ -37,6 +37,11 @@ export interface CallOpts {
   maxTokens?: number;
   /** Receives response text as it streams (e.g. to start work on early parts of a long reply). */
   onText?: (delta: string) => void;
+  /**
+   * Prompt caching (default on). Turn it off for single-use requests (reviews, one-off
+   * classifications): a cache write costs 1.25× input and is wasted if nothing reads it.
+   */
+  cache?: boolean;
 }
 
 export class RefusalError extends Error {}
@@ -97,7 +102,7 @@ async function run(opts: CallOpts, format?: ReturnType<typeof betaZodOutputForma
     thinking: { type: "adaptive" },
     output_config: format ? { effort: opts.effort, format } : { effort: opts.effort },
     // Cache the stable prefix (system + earlier turns) across retries and fix-up turns.
-    cache_control: { type: "ephemeral" },
+    ...(opts.cache === false ? {} : { cache_control: { type: "ephemeral" as const } }),
     system: opts.system,
     messages: opts.messages,
   });

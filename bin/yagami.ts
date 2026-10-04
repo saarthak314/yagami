@@ -19,7 +19,7 @@ const { color, createUi, fit, humanize, paint, servingLine, termWidth } = await 
 const { BASE, bookUrl, openUrl, startSite } = await import("../cli/server");
 type Site = import("../cli/server").Site;
 const { pick } = await import("../cli/picker");
-const { listBooks, draftBook, finalizeBook, builtUnits, defaultUnits } = await import("../scripts/create-book");
+const { listBooks, draftBook, startBook, builtUnits, defaultUnits } = await import("../scripts/create-book");
 type BookConfig = import("../src/types").BookConfig;
 type DemoPlan = import("../src/types").DemoPlan;
 
@@ -207,19 +207,23 @@ async function make(file: string) {
       .filter(Boolean)
       .join(" · ");
 
+  const opts: RunSpec["opts"] = { units: selected };
   await run({
     book,
     title: book.title,
     meta: meta(fresh ? undefined : book.domain),
     units: selected,
-    opts: { units: selected },
+    opts,
     before: fresh
       ? async ({ header, emit }) => {
-          // The one slow step before the pipeline: ask a model which subject this is.
+          // Ask a model which subject this is while the pages are prepared; planning waits for it.
           emit({ type: "stage", unit: "", stage: "init", status: "start", detail: "detecting the subject" });
-          await finalizeBook(pdf, book);
-          emit({ type: "stage", unit: "", stage: "init", status: "done" });
-          header(meta(book.domain));
+          const { domain } = startBook(pdf, book);
+          opts.domain = domain;
+          void domain.then((d) => {
+            emit({ type: "stage", unit: "", stage: "init", status: "done" });
+            header(meta(d));
+          });
         }
       : undefined,
   });

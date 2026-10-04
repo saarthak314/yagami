@@ -228,6 +228,8 @@ async function review(c: Ctx, demo: DemoSpec, shots: BeatShot[]): Promise<BeatRe
     system: reviewSystem(c.book),
     messages: [{ role: "user", content }],
     maxTokens: 16000,
+    // Each review is seen once: caching it would only add the cache-write surcharge.
+    cache: false,
   });
   return shots.map<BeatResult>((s) => {
     const r = data.beats.find((x) => x.beat === s.beat);

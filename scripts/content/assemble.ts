@@ -216,26 +216,30 @@ async function renderVariant(book: BookConfig, page: RawPage, png: string, k: nu
   return { width: info.width, height: info.height };
 }
 
-/**
- * The page at ~2x its CSS width (`<label>.webp`), plus sharper variants for
- * zoom and high-DPI screens: 3x and 4x for born-digital pages (from a 600 dpi
- * render), 3x for scans (their full resolution; more would only upscale).
- */
-async function renderPage(book: BookConfig, page: RawPage, dir: string, url: string): Promise<{ base: { width: number; height: number }; srcset: { src: string; w: number }[] }> {
+/** The page at ~2x its CSS width: `<label>.webp`, what the reader needs first. */
+async function renderBase(book: BookConfig, page: RawPage, dir: string): Promise<{ width: number; height: number }> {
   const text = book.source.kind === "text";
   const baseW = Math.round(page.crop.width * (text ? Math.min(1, TEXT_PAGE_PX / page.crop.width) : scanScale));
-  const base = await renderVariant(book, page, pagePng(book.slug, page.pdfPage), 1, baseW, path.join(dir, `${page.label}.webp`));
-  const srcset = [{ src: `${url}/${page.label}.webp`, w: base.width }];
+  return renderVariant(book, page, pagePng(book.slug, page.pdfPage), 1, baseW, path.join(dir, `${page.label}.webp`));
+}
+
+/**
+ * Sharper variants for zoom and high-DPI screens: 3x and 4x for born-digital pages
+ * (from a 600 dpi render), 3x for scans (their full resolution; more would only upscale).
+ */
+async function renderExtras(book: BookConfig, page: RawPage, dir: string, url: string, baseWidth: number): Promise<{ src: string; w: number }[]> {
+  const text = book.source.kind === "text";
   const extra: [string, number][] = text ? [["3x", 1.5], ["4x", 2]] : [["3x", 1.5]];
   const hi = text ? await hiResPng(book, page.pdfPage) : pagePng(book.slug, page.pdfPage);
   const k = text ? HI_DPI / DPI : 1;
+  const out: { src: string; w: number }[] = [];
   for (const [name, f] of extra) {
-    const w = Math.round(base.width * f);
+    const w = Math.round(baseWidth * f);
     if (w > page.crop.width * k + 2) continue; // never upscale past the source (± rounding)
     const v = await renderVariant(book, page, hi, k, w, path.join(dir, `${page.label}@${name}.webp`));
-    srcset.push({ src: `${url}/${page.label}@${name}.webp`, w: v.width });
+    out.push({ src: `${url}/${page.label}@${name}.webp`, w: v.width });
   }
-  return { base, srcset };
+  return out;
 }
 
 export async function assembleUnit(book: BookConfig, unitId: string): Promise<void> {
@@ -243,15 +247,16 @@ export async function assembleUnit(book: BookConfig, unitId: string): Promise<vo
   const pageDir = publicBookDir(book.slug, "pages", unitId);
   fs.mkdirSync(pageDir, { recursive: true });
 
+  // Base images only: the reader can open the book now. Sharper variants come later
+  // (assembleVariants), and the unit JSON gains their srcset then.
   const url = `books/${book.slug}/pages/${unitId}`;
   const pages: PageImage[] = await pool(raw.pages, 4, async (p) => {
-    const { base, srcset } = await renderPage(book, p, pageDir, url);
+    const base = await renderBase(book, p, pageDir);
     return {
       label: p.label,
       src: `${url}/${p.label}.webp`,
       width: Math.round(base.width / 2),
       height: Math.round(base.height / 2),
-      ...(srcset.length > 1 ? { srcset } : {}),
     };
   });
 
@@ -282,6 +287,32 @@ export async function assembleUnit(book: BookConfig, unitId: string): Promise<vo
   fs.writeFileSync(file, JSON.stringify(doc, null, 2));
   writeLibrary();
   info(`assemble: ${book.slug}/${unitId} ${pages.length} pages, ${anchors.length} anchors, ${doc.sections.length} sections`);
+}
+
+/**
+ * After assembleUnit: render the sharper page variants (bounded concurrency) and add
+ * their srcset to the unit JSON, written atomically so the reader never sees half a file.
+ */
+export async function assembleVariants(book: BookConfig, unitId: string): Promise<void> {
+  const raw: RawUnit = JSON.parse(fs.readFileSync(rawUnitPath(book.slug, unitId), "utf8"));
+  const file = unitJsonPath(book.slug, unitId);
+  const pageDir = publicBookDir(book.slug, "pages", unitId);
+  const url = `books/${book.slug}/pages/${unitId}`;
+  const widths = new Map((JSON.parse(fs.readFileSync(file, "utf8")) as Unit).pages.map((p) => [p.label, p.width * 2]));
+  const extras = new Map<string, { src: string; w: number }[]>();
+  await pool(raw.pages, 2, async (p) => {
+    const baseW = widths.get(p.label);
+    if (baseW) extras.set(p.label, await renderExtras(book, p, pageDir, url, baseW));
+  });
+  // Re-read: the base JSON may have been rewritten meanwhile; only srcset is added.
+  const doc = JSON.parse(fs.readFileSync(file, "utf8")) as Unit;
+  for (const pg of doc.pages) {
+    const more = extras.get(pg.label);
+    if (more?.length) pg.srcset = [{ src: pg.src, w: pg.width * 2 }, ...more];
+  }
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(doc, null, 2));
+  fs.renameSync(tmp, file);
 }
 
 /** public/books/index.json: every book with at least one assembled unit, units in config order. */

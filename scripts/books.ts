@@ -219,6 +219,22 @@ export function sampleText(pdf: string, maxChars = 6000): string {
   return `${info.title}\n\n${pdfText(pdf, 1, Math.min(4, info.pages)).replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n")}`.slice(0, maxChars);
 }
 
+/**
+ * A local first guess at the domain (keyword counts), used for book.json until the
+ * model's answer arrives; good enough to keep if a run stops before then.
+ */
+export function guessDomain(text: string): Domain {
+  const t = text.toLowerCase();
+  const count = (words: string[]) => words.reduce((n, w) => n + (t.match(new RegExp(`\\b${w}`, "g"))?.length ?? 0), 0);
+  const score: Record<Domain, number> = {
+    ml: count(["neural", "training", "model", "attention", "transformer", "gradient", "loss", "learning", "dataset", "embedding"]),
+    cs: count(["algorithm", "memory", "program", "compiler", "data structure", "pointer", "hash", "runtime", "complexity", "malloc"]),
+    physics: count(["energy", "force", "velocity", "momentum", "particle", "field", "mass", "gravit", "quantum", "motion"]),
+    math: count(["theorem", "proof", "lemma", "integral", "matrix", "equation", "function", "probability", "group", "vector"]),
+  };
+  return (Object.entries(score) as [Domain, number][]).sort((a, b) => b[1] - a[1])[0][0];
+}
+
 /** Classify a text into one of the demo domains with one cheap call. */
 export async function detectDomain(text: string): Promise<Domain> {
   const { callJson, MODELS } = await import("./lib/claude");
@@ -228,6 +244,7 @@ export async function detectDomain(text: string): Promise<Domain> {
     effort: "low",
     label: "detect-domain",
     maxTokens: 2000,
+    cache: false,
     messages: [
       {
         role: "user",

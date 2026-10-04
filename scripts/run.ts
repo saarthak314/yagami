@@ -9,13 +9,13 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { BookConfig, DemoSpec } from "../src/types";
+import type { BookConfig, DemoSpec, Domain } from "../src/types";
 import { loadBook, unitJsonPath, unitOf } from "./books";
 import { onCost, pool } from "./lib/claude";
 import type { Emit, Stage } from "./lib/events";
 import { Limit } from "./lib/limit";
 import { emit, setEmit } from "./lib/report";
-import { assembleUnit, anchorUnit, renderUnit } from "./content/index";
+import { assembleUnit, assembleVariants, anchorUnit, renderUnit } from "./content/index";
 import { fileHash, hash, readCache, updateCache } from "./demos/cache";
 import { loadCtx, loadPlan, paths } from "./demos/common";
 import { buildDemo, loadConvo, reviseDemo } from "./demos/build";
@@ -39,6 +39,11 @@ export interface RunOpts {
   concurrency?: number;
   /** Redo steps even when their inputs are unchanged. */
   force?: boolean;
+  /**
+   * The book's subject, still being detected (see startBook). Content steps run meanwhile;
+   * planning and building wait for it, since the subject picks their prompts.
+   */
+  domain?: Promise<Domain>;
 }
 
 export interface RunResult {
@@ -69,6 +74,17 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
     // Content: cheap and local; do every unit first so the reader is usable early.
     const contentOk = new Set<string>();
     const codeHash = contentCodeHash();
+    // Sharper page variants render in the background once a unit's base pages are ready.
+    const background: Promise<void>[] = [];
+    const variantsLater = (unit: string, key: string) => {
+      if (!steps.has("assemble") || readCache(slug, unit).variants === key) return;
+      if (hasAllVariants(slug, unit)) return updateCache(slug, unit, (c) => void (c.variants = key)); // made before this cache existed
+      background.push(
+        assembleVariants(book, unit)
+          .then(() => updateCache(slug, unit, (c) => void (c.variants = key)))
+          .catch((e: Error) => emit({ type: "log", level: "warn", message: `sharper pages for ${unit} failed: ${e.message}` })),
+      );
+    };
     for (const unit of units) {
       try {
         // Skip pages + anchors when nothing they depend on changed (PDF, book settings, content code).
@@ -78,6 +94,7 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
           for (const stage of ["render", "anchors", "assemble"] as const)
             if (steps.has(stage)) emit({ type: "stage", unit, stage, status: "skip", detail: "unchanged" });
           contentOk.add(unit);
+          variantsLater(unit, key);
           continue;
         }
         for (const [stage, fn] of [
@@ -90,13 +107,21 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
           await fn(book, unit);
           emit({ type: "stage", unit, stage, status: "done" });
         }
-        if (["render", "anchors", "assemble"].every((s) => steps.has(s as Stage))) updateCache(slug, unit, (c) => void (c.content = key));
+        if (["render", "anchors", "assemble"].every((s) => steps.has(s as Stage))) {
+          updateCache(slug, unit, (c) => {
+            c.content = key;
+            delete c.variants; // the base pages were redone: their variants must be too
+          });
+          variantsLater(unit, key);
+        }
         contentOk.add(unit);
       } catch (e) {
         emit({ type: "stage", unit, stage: "anchors", status: "error", detail: (e as Error).message });
         failures.push(`${slug}/${unit} content: ${(e as Error).message}`);
       }
     }
+
+    if (opts.domain) book.domain = await opts.domain;
 
     const demoLimit = new Limit(opts.concurrency ?? 8);
     const getEnv = () => (env ??= startEnv());
@@ -114,6 +139,7 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
       }
     });
 
+    await Promise.all(background); // usually long done: variants are quicker than demos
     const seconds = (Date.now() - t0) / 1000;
     emit({ type: "done", seconds, cost, failures });
     return { failures, cost, seconds };
@@ -267,4 +293,14 @@ function contentCodeHash(): string {
   };
   walk(path.resolve("scripts/content"));
   return hash(...files.sort().map((f) => fs.readFileSync(f)));
+}
+
+/** Every page of the unit already lists its sharper variants (srcset) and the files exist. */
+function hasAllVariants(slug: string, unit: string): boolean {
+  try {
+    const doc = JSON.parse(fs.readFileSync(unitJsonPath(slug, unit), "utf8")) as { pages: { srcset?: { src: string }[] }[] };
+    return doc.pages.length > 0 && doc.pages.every((p) => (p.srcset?.length ?? 0) > 1 && p.srcset!.every((v) => fs.existsSync(path.join("public", v.src))));
+  } catch {
+    return false;
+  }
 }

@@ -86,6 +86,33 @@ export async function finalizeBook(pdf: string, book: BookConfig): Promise<BookC
   return book;
 }
 
+/**
+ * For a fresh draft, without waiting: copy the PDF and write book.json now (with a local
+ * guess at the subject) so the content steps can start, and ask the model for the subject
+ * in the background. `domain` resolves to the answer (book.json is updated when it does;
+ * on any error the guess stands). Pass it to runBook so planning waits for it.
+ */
+export function startBook(pdf: string, book: BookConfig): { book: BookConfig; domain: Promise<BookConfig["domain"]> } {
+  const sample = books.sampleText(pdf);
+  book.domain = books.guessDomain(sample);
+  const dir = path.join("books", book.slug);
+  const write = () => fs.writeFileSync(path.join(dir, "book.json"), JSON.stringify(book, null, 2) + "\n");
+  fs.mkdirSync(dir, { recursive: true });
+  if (path.resolve(pdf) !== path.resolve(book.source.pdf)) fs.copyFileSync(pdf, book.source.pdf);
+  write();
+  const domain = books
+    .detectDomain(sample)
+    .then((d) => {
+      if (d !== book.domain) {
+        book.domain = d;
+        write();
+      }
+      return d;
+    })
+    .catch(() => book.domain);
+  return { book, domain };
+}
+
 /** Units that already have demos (a plan). */
 export function builtUnits(book: BookConfig): Set<string> {
   return new Set(book.units.filter((u) => fs.existsSync(path.join("src/demos", book.slug, u.id, "plan.json"))).map((u) => u.id));

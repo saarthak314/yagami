@@ -9,7 +9,7 @@ import { feynmanAnchors } from "./scanned/feynman";
 import { genericScannedAnchors } from "./scanned/generic";
 
 export { renderUnit } from "./render";
-export { assembleUnit, writeLibrary } from "./assemble";
+export { assembleUnit, assembleVariants, writeLibrary } from "./assemble";
 
 /**
  * Optional OCR rules for scanned books whose layout the generic adapter can't

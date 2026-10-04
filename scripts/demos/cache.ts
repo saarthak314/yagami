@@ -9,6 +9,8 @@ import { paths, writeJson } from "./common";
 export interface UnitCache {
   /** Hash of the content steps' inputs (PDF, book settings, content code) when pages + anchors were made. */
   content?: string;
+  /** Same key as `content`, once the sharper page variants (srcset) exist too. */
+  variants?: string;
   /** Hash of the planner's inputs when plan.json was written. */
   plan?: string;
   demos: Record<string, { spec?: string; code?: string; verified?: boolean }>;
@@ -25,7 +27,7 @@ export function readCache(slug: string, unit: string): UnitCache {
   if (!fs.existsSync(f)) return { demos: {} };
   try {
     const c = JSON.parse(fs.readFileSync(f, "utf8")) as UnitCache;
-    return { content: c.content, plan: c.plan, demos: c.demos ?? {} };
+    return { content: c.content, variants: c.variants, plan: c.plan, demos: c.demos ?? {} };
   } catch {
     return { demos: {} };
   }

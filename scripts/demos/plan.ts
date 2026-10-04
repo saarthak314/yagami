@@ -57,7 +57,7 @@ const PLAN_VERSION = "2";
 
 // --- Verbatim-copy detection -----------------------------------------------------
 
-function shingles(text: string, n: number): Set<string> {
+export function shingles(text: string, n: number): Set<string> {
   const w = text.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(Boolean);
   const out = new Set<string>();
   for (let i = 0; i + n <= w.length; i++) out.add(w.slice(i, i + n).join(" "));
@@ -67,7 +67,7 @@ function shingles(text: string, n: number): Set<string> {
 // --- Local fixes + checks (one demo at a time) ---------------------------------
 
 /** State shared across the demos of one plan (uniqueness constraints). */
-interface PlanState {
+export interface PlanState {
   ids: Set<string>;
   components: Set<string>;
   anchors: Set<string>;
@@ -94,7 +94,34 @@ function coerce(c: ControlSpec, v: ParamValue): ParamValue | undefined {
  * Fix what can be fixed without the model, in place. Returns the remaining
  * problems (empty = accept). Does not reserve ids/anchors in `state`.
  */
-function fixDemo(d: DemoSpec, c: Ctx, state: PlanState, copied: (s: string) => boolean): string[] {
+export interface CopyCheck {
+  /** Displayed text (captions): any 9-word run shared with the book. */
+  caption: (s: string) => boolean;
+  /** The brief is an internal spec for the builder, never shown: only long runs (25 words) count as copying. */
+  brief: (s: string) => boolean;
+}
+
+/** Cut text at a word boundary to at most `max` chars (no ellipsis: titles and captions read as written). */
+function clip(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max + 1).replace(/\s+\S*$/, "");
+  return (cut || s.slice(0, max)).replace(/[\s,;:–—-]+$/, "");
+}
+
+/** A long caption keeps its leading whole sentences that fit; else it is clipped at a word. */
+function trimCaption(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const sentences = s.match(/[^.?]+[.?]+(\s+|$)/g) ?? [];
+  let out = "";
+  for (const x of sentences) {
+    if ((out + x).trim().length > max) break;
+    out += x;
+  }
+  return out.trim() || clip(s, max);
+}
+
+/** Exported for tests. */
+export function fixDemo(d: DemoSpec, c: Ctx, state: PlanState, copied: CopyCheck): string[] {
   const errs: string[] = [];
   const anchors = c.unit.anchors;
   const order = new Map(anchors.map((a, i) => [a.id, i]));
@@ -106,14 +133,15 @@ function fixDemo(d: DemoSpec, c: Ctx, state: PlanState, copied: (s: string) => b
   if (!/^[A-Z]/.test(d.component)) d.component = d.component.charAt(0).toUpperCase() + d.component.slice(1);
   if (!/^[A-Z][A-Za-z0-9]+$/.test(d.component)) d.component = d.id.replace(/(^|-)([a-z0-9])/g, (_, __, ch: string) => ch.toUpperCase());
   while (state.components.has(d.component)) d.component = `${d.component}2`;
-  if (d.title.length > 48) errs.push(`title is ${d.title.length} chars; at most 48`);
+  d.title = clip(d.title.trim(), 48);
   if (d.brief.length < 200) errs.push("brief is too short (at least 150 words of implementable spec)");
-  if (copied(d.brief)) errs.push("brief copies sentences from the text; write it in your own words");
+  if (copied.brief(d.brief)) errs.push("brief copies long passages from the text; write it in your own words");
 
   // Controls, readouts, presets.
   const seenControl = new Set<string>();
   d.controls = d.controls.filter((x) => (seenControl.has(x.id) ? false : (seenControl.add(x.id), true)));
-  if (d.controls.length > 6) errs.push(`${d.controls.length} controls; at most 6`);
+  // More than 6 controls: keep the first 6 (preset values for the rest stay as fixed params).
+  d.controls = d.controls.slice(0, 6);
   for (const x of d.controls) if (x.type === "slider" && x.min > x.max) [x.min, x.max] = [x.max, x.min];
   const seenReadout = new Set<string>();
   d.readouts = d.readouts.filter((r) => (seenReadout.has(r.id) ? false : (seenReadout.add(r.id), true))).slice(0, 5);
@@ -152,11 +180,10 @@ function fixDemo(d: DemoSpec, c: Ctx, state: PlanState, copied: (s: string) => b
       b.params = Object.keys(out).length ? out : undefined;
       if (!b.params) delete b.params;
     }
-    b.caption = b.caption.replace(/!/g, ".").trim();
+    b.caption = trimCaption(b.caption.replace(/!/g, ".").trim(), 260);
     if (/\bAI\b/.test(b.caption)) errs.push(`beat at ${b.anchor}: caption must not mention AI`);
-    if (b.caption.length > 260) errs.push(`beat at ${b.anchor}: caption is ${b.caption.length} chars; at most 260`);
     if (b.caption.length < 10) errs.push(`beat at ${b.anchor}: caption too short`);
-    if (copied(b.caption)) errs.push(`beat at ${b.anchor}: caption copies a sentence from the text; write it in your own words`);
+    if (copied.caption(b.caption)) errs.push(`beat at ${b.anchor}: caption copies a sentence from the text; write it in your own words`);
     beats.push(b);
   }
   beats.sort((a, b) => order.get(a.anchor)! - order.get(b.anchor)!);
@@ -240,7 +267,7 @@ You get the ${noun} as (1) the page images — authoritative for equations, figu
 
 Write every caption and brief in your own words. Never copy sentences from the text; short phrases, symbols and equations are fine.
 
-Your job: propose 3–7 demos for the ${noun} that genuinely aid understanding. Across all fields, good demos:
+Your job: propose 3–7 demos for the ${noun} that genuinely aid understanding — about one per distinct idea worth seeing; a unit of 5+ pages usually has 5–6. Across all fields, good demos:
 - let the reader see and manipulate exactly what the text describes, with readouts that check an equation or a quoted number;
 - cover the ${noun} from start to end where it has substance, so the reader has a demo for most of the reading;
 - are simple enough to implement well in a single React canvas component (~200–400 lines). Prefer one demo with several presets over several thin demos.
@@ -320,18 +347,64 @@ export async function planUnit(book: BookConfig, unitId: string, opts: PlanOpts 
   });
   const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content }];
 
-  const bookRuns = shingles(Object.values(c.text.text).join(" \n "), 9);
-  const copied = (s: string) => [...shingles(s, 9)].some((r) => bookRuns.has(r));
+  const bookText = Object.values(c.text.text).join(" \n ");
+  const captionRuns = shingles(bookText, 9);
+  const briefRuns = shingles(bookText, 25);
+  const copied: CopyCheck = {
+    caption: (x) => [...shingles(x, 9)].some((r) => captionRuns.has(r)),
+    brief: (x) => [...shingles(x, 25)].some((r) => briefRuns.has(r)),
+  };
   const state: PlanState = { ids: new Set(), components: new Set(), anchors: new Set() };
   const accepted: DemoSpec[] = [];
-  const pending: { spec: DemoSpec; errors: string[] }[] = [];
+  const dropped: { spec: DemoSpec; errors: string[] }[] = [];
+  const repairs: Promise<void>[] = [];
   const order = new Map(c.unit.anchors.map((a, i) => [a.id, i]));
 
   const write = () => {
     const demos = [...accepted].sort((a, b) => order.get(a.beats[0].anchor)! - order.get(b.beats[0].anchor)!);
     writeJson(out, { book: book.slug, unit: unitId, demos });
   };
-  const consider = (raw: unknown) => {
+
+  // A demo that still has problems after the local fixes is repaired on its own, right away
+  // (in parallel with the rest of the plan streaming in), so it never holds up other demos
+  // and the plan doesn't wait for its end to start repairs. Same cached prefix as the plan.
+  const repair = (spec: DemoSpec, errors: string[], round: number) => {
+    if (round > 2) {
+      dropped.push({ spec, errors });
+      return;
+    }
+    log(`plan ${t}: repairing ${spec.id} (round ${round})`);
+    const ask: Anthropic.Beta.BetaMessageParam = {
+      role: "user",
+      content: [
+        ...(messages[0].content as Anthropic.Beta.BetaContentBlockParam[]),
+        {
+          type: "text",
+          text: `You proposed this demo for the plan:\n${JSON.stringify(spec)}\n\nIt needs corrections before it can be used:\n${errors.map((e) => `- ${e}`).join("\n")}\n\nAnchors already used by other demos (do not reuse): ${[...state.anchors].join(", ") || "none"}.\nReply with JSON {"demos": [ ... ]} containing only the corrected version of this demo.`,
+        },
+      ],
+    };
+    let got = false;
+    const scan = new DemoScanner((json) => {
+      try {
+        got = true;
+        consider(JSON.parse(json), round + 1);
+      } catch {
+        /* handled below */
+      }
+    });
+    repairs.push(
+      call({ model: MODELS.opus, effort: "low", label: `plan-repair:${t}`, system: systemFor(book), messages: [ask], onText: (d) => scan.push(d) })
+        .then(() => {
+          if (!got) dropped.push({ spec, errors: [...errors, "the repair returned no demo"] });
+        })
+        .catch((e: Error) => {
+          dropped.push({ spec, errors: [...errors, `repair failed: ${e.message}`] });
+        }),
+    );
+  };
+
+  const consider = (raw: unknown, round = 1) => {
     const parsed = DemoSpecLoose.safeParse(raw);
     if (!parsed.success) {
       log(`plan ${t}: unparseable demo (${parsed.error.issues[0]?.message ?? "?"})`);
@@ -340,10 +413,7 @@ export async function planUnit(book: BookConfig, unitId: string, opts: PlanOpts 
     const spec = parsed.data as DemoSpec;
     if (accepted.length >= 7) return;
     const errors = fixDemo(spec, c, state, copied);
-    if (errors.length) {
-      pending.push({ spec, errors });
-      return;
-    }
+    if (errors.length) return repair(spec, errors, round);
     reserve(spec, state);
     accepted.push(spec);
     write();
@@ -360,43 +430,31 @@ export async function planUnit(book: BookConfig, unitId: string, opts: PlanOpts 
   });
   const { message } = await call({
     model: MODELS.opus,
-    effort: opts.effort ?? "medium",
+    effort: opts.effort ?? planEffort(),
     label: `plan:${t}`,
     system: systemFor(book),
     messages,
     onText: (d) => scanner.push(d),
   });
-  messages.push({ role: "assistant", content: message.content });
 
   // Safety net: if streaming parsing missed demos (unusual formatting), parse the whole reply.
-  if (!accepted.length && !pending.length) {
+  if (!accepted.length && !repairs.length) {
     const whole = extractJson(textOf(message)) as { demos?: unknown[] };
     for (const d of whole.demos ?? []) consider(d);
   }
 
-  // Repair only the demos that still have problems (≤ 2 short follow-ups).
-  for (let round = 1; round <= 2 && pending.length && accepted.length < 7; round++) {
-    const batch = pending.splice(0);
-    log(`plan ${t}: repairing ${batch.length} demo(s) (round ${round})`);
-    messages.push({
-      role: "user",
-      content: `Some demos need corrections before they can be used:\n\n${batch
-        .map((p) => `Demo "${p.spec.id}":\n${p.errors.map((e) => `- ${e}`).join("\n")}`)
-        .join("\n\n")}\n\nAnchors already used by accepted demos (do not reuse): ${[...state.anchors].join(", ") || "none"}.\nReply with JSON {"demos": [ ... ]} containing only the corrected versions of these demos.`,
-    });
-    const scanner2 = new DemoScanner((json) => {
-      try {
-        consider(JSON.parse(json));
-      } catch {
-        /* reported below if nothing usable came back */
-      }
-    });
-    const r = await call({ model: MODELS.opus, effort: "low", label: `plan-repair:${t}`, system: systemFor(book), messages, onText: (d) => scanner2.push(d) });
-    messages.push({ role: "assistant", content: r.message.content });
-  }
-  for (const p of pending) log(`plan ${t}: dropped ${p.spec.id}: ${p.errors.join("; ")}`);
+  // Repairs may start further repairs (round 2): wait until none are left.
+  for (let n = 0; n < repairs.length; n = repairs.length) await Promise.all(repairs.slice(n));
+  for (const p of dropped) log(`plan ${t}: dropped ${p.spec.id}: ${p.errors.join("; ")}`);
   if (!accepted.length) throw new Error(`plan ${t}: no usable demos`);
   write();
   log(`plan ${t}: ${accepted.length} demos, ${accepted.reduce((s, d) => s + d.beats.length, 0)} beats → ${out}`);
   return { book: book.slug, unit: unitId, demos: accepted };
 }
+
+/** Planner effort: YAGAMI_PLAN_EFFORT (low | medium | high | xhigh | max), default low (benchmarked: half the time and cost of medium, same pass rate). */
+export function planEffort(): Effort {
+  const e = process.env.YAGAMI_PLAN_EFFORT;
+  return e === "low" || e === "medium" || e === "high" || e === "xhigh" || e === "max" ? e : "low";
+}
+
