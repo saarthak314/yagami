@@ -409,6 +409,352 @@ export function validateAlgorithmSteps(c: unknown, spec: DemoSpec): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 4 templates
+// ---------------------------------------------------------------------------
+
+export interface CalculusPlotConfig extends Common {
+  f: string;
+  x: { min: Num; max: Num; label?: string };
+  y?: { min?: Num; max?: Num; label?: string };
+  label?: string;
+  at?: Num;
+  tangent?: boolean;
+  secant?: { h: Num };
+  riemann?: { from: Num; to: Num; n: Num; rule?: "left" | "right" | "mid" | "trap" };
+  area?: { from: Num; to: Num };
+  panels?: ("derivative" | "integral")[];
+  sweep?: { seconds?: number };
+}
+
+export interface ParametricCurve {
+  x?: string;
+  y?: string;
+  r?: string;
+  s: [Num, Num];
+  label?: string;
+  color?: Color;
+  dashed?: boolean;
+}
+export interface ParametricPlotConfig extends Common {
+  view: { x: [Num, Num]; y: [Num, Num]; equal?: boolean; xLabel?: string; yLabel?: string };
+  curves: ParametricCurve[];
+  field?: { u: string; v: string; n?: number; normalize?: boolean; color?: Color };
+  point?: { curve?: number; s: Num; label?: string; velocity?: boolean; trail?: Num; sector?: { cx: Num; cy: Num; span: Num } };
+  points?: { x: Num; y: Num; label?: string }[];
+  sweep?: { seconds?: number };
+}
+
+export type GeometryShape =
+  | { kind: "segment" | "ray" | "line"; from: string; to: string; label?: string; color?: Color; dashed?: boolean; arrow?: boolean }
+  | { kind: "circle"; center: string; r: Num; label?: string; color?: Color; dashed?: boolean }
+  | { kind: "polygon"; points: string[]; label?: string; color?: Color; fill?: boolean; dashed?: boolean }
+  | { kind: "angle"; at: string; from: string; to: string; label?: string; color?: Color }
+  | { kind: "arc"; center: string; r: Num; from: Num; to: Num; label?: string; color?: Color; dashed?: boolean };
+export interface GeometryConfig extends Common {
+  view?: { x: [Num, Num]; y: [Num, Num] };
+  points: { name: string; x: Num; y: Num; label?: string; hidden?: boolean; color?: Color }[];
+  shapes?: GeometryShape[];
+  grid?: boolean;
+  sweep?: { seconds?: number };
+}
+
+export interface SequenceConfig extends Common {
+  state?: Record<string, Num>;
+  next?: Record<string, string>;
+  term?: string;
+  n: Num;
+  show?: "terms" | "sum" | "both";
+  limit?: Num;
+  table?: { columns: string[]; rows?: number };
+  speed?: Num;
+  label?: string;
+  xLabel?: string;
+}
+
+export interface CellRow {
+  label?: string;
+  n: Num;
+  value: string;
+  style?: string;
+  index?: string;
+  groups?: { from: Num; to: Num; label: string; color?: Color }[];
+}
+export interface CellGridConfig extends Common {
+  rows: CellRow[];
+  pointers?: { row?: number; at: Num; label: string; color?: Color }[];
+  steps?: Num;
+  speed?: Num;
+  message?: string;
+}
+
+export const STRUCTURES = ["stack", "queue", "linked-list", "bst", "min-heap", "hash-table"] as const;
+export type Structure = (typeof STRUCTURES)[number];
+export const STRUCTURE_OPS = ["push", "pop", "enqueue", "dequeue", "insert", "delete", "search"] as const;
+export type StructureOp = (typeof STRUCTURE_OPS)[number];
+export interface DataStructureConfig extends Common {
+  kind: Structure;
+  ops: { op: StructureOp; value?: Num }[];
+  buckets?: Num;
+  hash?: string;
+  speed?: Num;
+  code?: boolean;
+}
+
+/** Functions the cell-grid template adds (bit operations work on integers up to 2^53). */
+export const CELL_FNS = ["bit", "band", "bor", "bxor", "bnot", "shl", "shr", "hex", "bin", "str", "pad"];
+/** Functions the geometry template adds (points are values [x, y]). */
+export const GEOMETRY_FNS = ["dist", "ang", "area", "mid", "dir"];
+
+const RULES = ["left", "right", "mid", "trap"];
+
+export function validateCalculusPlot(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, ["t", "u"]);
+  k.defs(c.defs);
+  k.expr(c.f, "f", ["x"]);
+  if (!isObj(c.x)) k.add("x: { min, max, label? } is required");
+  else {
+    k.expr(c.x.min, "x.min");
+    k.expr(c.x.max, "x.max");
+  }
+  if (c.y !== undefined) {
+    if (!isObj(c.y)) k.add("y: must be an object");
+    else {
+      k.optExpr(c.y.min, "y.min");
+      k.optExpr(c.y.max, "y.max");
+    }
+  }
+  k.optExpr(c.at, "at");
+  if ((c.tangent || c.secant !== undefined) && c.at === undefined) k.add("at: required for tangent/secant");
+  if (c.secant !== undefined) {
+    if (!isObj(c.secant)) k.add("secant: must be { h }");
+    else k.expr(c.secant.h, "secant.h");
+  }
+  if (c.riemann !== undefined) {
+    if (!isObj(c.riemann)) k.add("riemann: must be { from, to, n, rule? }");
+    else {
+      for (const f of ["from", "to", "n"]) k.expr(c.riemann[f], `riemann.${f}`);
+      if (c.riemann.rule !== undefined && !RULES.includes(c.riemann.rule as string)) k.add(`riemann.rule: must be one of ${RULES.join(", ")}`);
+    }
+  }
+  if (c.area !== undefined) {
+    if (!isObj(c.area)) k.add("area: must be { from, to }");
+    else {
+      k.expr(c.area.from, "area.from");
+      k.expr(c.area.to, "area.to");
+    }
+  }
+  if (c.panels !== undefined && !(Array.isArray(c.panels) && c.panels.every((p) => p === "derivative" || p === "integral"))) k.add('panels: a list of "derivative" and/or "integral"');
+  k.readouts(c.readouts, spec, ["a", "fa", "slope", "secant", "h", "riemann", "exact", "error", "area", "n"]);
+  return k.problems;
+}
+
+function vec2(k: Checker, v: unknown, where: string, extra: string[] = []) {
+  if (!Array.isArray(v) || v.length !== 2) return k.add(`${where}: must be [a, b]`);
+  v.forEach((x, i) => k.expr(x, `${where}[${i}]`, extra));
+}
+
+export function validateParametricPlot(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, ["t", "u"]);
+  k.defs(c.defs);
+  if (!isObj(c.view)) k.add("view: { x: [min, max], y: [min, max], equal? } is required");
+  else {
+    vec2(k, c.view.x, "view.x");
+    vec2(k, c.view.y, "view.y");
+  }
+  const curves = Array.isArray(c.curves) ? c.curves : [];
+  if (!curves.length || curves.length > 4) k.add("curves: 1–4 curves are required");
+  curves.forEach((cv, i) => {
+    if (!isObj(cv)) return k.add(`curves[${i}]: must be an object`);
+    if (cv.r !== undefined) k.expr(cv.r, `curves[${i}].r`, ["s"]);
+    else {
+      k.expr(cv.x, `curves[${i}].x`, ["s"]);
+      k.expr(cv.y, `curves[${i}].y`, ["s"]);
+    }
+    vec2(k, cv.s, `curves[${i}].s`);
+    k.color(cv.color, `curves[${i}]`);
+  });
+  if (c.field !== undefined) {
+    if (!isObj(c.field)) k.add("field: must be { u, v, n?, normalize? }");
+    else {
+      k.expr(c.field.u, "field.u", ["x", "y"]);
+      k.expr(c.field.v, "field.v", ["x", "y"]);
+      k.color(c.field.color, "field");
+    }
+  }
+  if (c.point !== undefined) {
+    const p = c.point;
+    if (!isObj(p)) k.add("point: must be { s, curve?, label?, velocity?, sector? }");
+    else {
+      k.expr(p.s, "point.s");
+      if (p.curve !== undefined && !(typeof p.curve === "number" && p.curve >= 0 && p.curve < curves.length)) k.add("point.curve: must be a curve index");
+      k.optExpr(p.trail, "point.trail");
+      if (p.sector !== undefined) {
+        if (!isObj(p.sector)) k.add("point.sector: must be { cx, cy, span }");
+        else for (const f of ["cx", "cy", "span"]) k.expr(p.sector[f], `point.sector.${f}`);
+      }
+    }
+  }
+  if (Array.isArray(c.points))
+    c.points.forEach((p, i) => {
+      if (!isObj(p)) return k.add(`points[${i}]: must be { x, y, label? }`);
+      k.expr(p.x, `points[${i}].x`);
+      k.expr(p.y, `points[${i}].y`);
+    });
+  k.readouts(c.readouts, spec, ["s", "px", "py", "vx", "vy", "speed", "r", "theta", "sector", "length"]);
+  return k.problems;
+}
+
+const SHAPES = ["segment", "ray", "line", "circle", "polygon", "angle", "arc"];
+export function validateGeometry(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, ["t", "u"], GEOMETRY_FNS);
+  k.defs(c.defs);
+  if (c.view !== undefined) {
+    if (!isObj(c.view)) k.add("view: must be { x: [min, max], y: [min, max] }");
+    else {
+      vec2(k, c.view.x, "view.x");
+      vec2(k, c.view.y, "view.y");
+    }
+  }
+  const pts = Array.isArray(c.points) ? c.points : [];
+  if (!pts.length || pts.length > 16) k.add("points: 1–16 named points are required");
+  const names: string[] = [];
+  pts.forEach((p, i) => {
+    if (!isObj(p)) return k.add(`points[${i}]: must be { name, x, y }`);
+    const nm = String(p.name ?? "");
+    if (!/^[A-Za-z_]\w*$/.test(nm)) k.add(`points[${i}].name: must be a simple name`);
+    const visible = names.flatMap((n) => [n, `${n}_x`, `${n}_y`]);
+    k.expr(p.x, `points[${i}].x`, visible);
+    k.expr(p.y, `points[${i}].y`, visible);
+    k.color(p.color, `points[${i}]`);
+    names.push(nm);
+  });
+  const all = names.flatMap((n) => [n, `${n}_x`, `${n}_y`]);
+  const isPt = (v: unknown) => typeof v === "string" && names.includes(v);
+  (Array.isArray(c.shapes) ? c.shapes : []).forEach((sh, i) => {
+    const w = `shapes[${i}]`;
+    if (!isObj(sh) || !SHAPES.includes(sh.kind as string)) return k.add(`${w}.kind: must be one of ${SHAPES.join(", ")}`);
+    k.color(sh.color, w);
+    if (sh.kind === "segment" || sh.kind === "ray" || sh.kind === "line") {
+      if (!isPt(sh.from) || !isPt(sh.to)) k.add(`${w}: from/to must name points`);
+    } else if (sh.kind === "circle") {
+      if (!isPt(sh.center)) k.add(`${w}.center: must name a point`);
+      k.expr(sh.r, `${w}.r`, all);
+    } else if (sh.kind === "polygon") {
+      if (!Array.isArray(sh.points) || sh.points.length < 2 || !sh.points.every(isPt)) k.add(`${w}.points: 2+ point names`);
+    } else if (sh.kind === "angle") {
+      if (!isPt(sh.at) || !isPt(sh.from) || !isPt(sh.to)) k.add(`${w}: at/from/to must name points`);
+    } else if (sh.kind === "arc") {
+      if (!isPt(sh.center)) k.add(`${w}.center: must name a point`);
+      for (const f of ["r", "from", "to"]) k.expr(sh[f], `${w}.${f}`, all);
+    }
+  });
+  k.readouts(c.readouts, spec, all);
+  return k.problems;
+}
+
+export function validateSequence(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, ["t"]);
+  k.defs(c.defs);
+  const vars: string[] = [];
+  if (c.state !== undefined) {
+    if (!isObj(c.state)) k.add("state: must be { name: initial value }");
+    else
+      for (const [v, e] of Object.entries(c.state)) {
+        if (!/^[A-Za-z_]\w*$/.test(v)) k.add(`state: "${v}" is not a valid name`);
+        k.expr(e, `state.${v}`);
+        vars.push(v);
+      }
+  }
+  if (c.next !== undefined) {
+    if (!isObj(c.next)) k.add("next: must be { name: update expression }");
+    else
+      for (const [v, e] of Object.entries(c.next)) {
+        if (!vars.includes(v)) k.add(`next: "${v}" is not a state variable`);
+        k.expr(e, `next.${v}`, [...vars, "n"]);
+      }
+  }
+  if (!vars.length && c.term === undefined) k.add("term (explicit, in n) or state + next (a recurrence) is required");
+  k.optExpr(c.term, "term", [...vars, "n"]);
+  k.expr(c.n, "n");
+  if (c.show !== undefined && !["terms", "sum", "both"].includes(c.show as string)) k.add("show: terms | sum | both");
+  k.optExpr(c.limit, "limit");
+  if (c.table !== undefined) {
+    if (!isObj(c.table) || !Array.isArray(c.table.columns)) k.add("table: must be { columns: [...], rows? }");
+    else for (const col of c.table.columns) if (![...vars, "n", "term", "S"].includes(col as string)) k.add(`table.columns: "${String(col)}" must be n, term, S or a state variable`);
+  }
+  k.optExpr(c.speed, "speed");
+  k.readouts(c.readouts, spec, [...vars, "n", "N", "term", "S", "S_N", "term_N", "limit"]);
+  return k.problems;
+}
+
+export function validateCellGrid(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, ["t", "k", "steps"], CELL_FNS);
+  k.defs(c.defs);
+  const rows = Array.isArray(c.rows) ? c.rows : [];
+  if (!rows.length || rows.length > 4) k.add("rows: 1–4 rows are required");
+  rows.forEach((r, i) => {
+    const w = `rows[${i}]`;
+    if (!isObj(r)) return k.add(`${w}: must be an object`);
+    k.expr(r.n, `${w}.n`);
+    k.expr(r.value, `${w}.value`, ["i"]);
+    k.optExpr(r.style, `${w}.style`, ["i"]);
+    k.optExpr(r.index, `${w}.index`, ["i"]);
+    (Array.isArray(r.groups) ? r.groups : []).forEach((g, j) => {
+      if (!isObj(g) || typeof g.label !== "string") return k.add(`${w}.groups[${j}]: must be { from, to, label }`);
+      k.expr(g.from, `${w}.groups[${j}].from`);
+      k.expr(g.to, `${w}.groups[${j}].to`);
+      k.color(g.color, `${w}.groups[${j}]`);
+    });
+  });
+  (Array.isArray(c.pointers) ? c.pointers : []).forEach((p, i) => {
+    if (!isObj(p) || typeof p.label !== "string") return k.add(`pointers[${i}]: must be { at, label, row? }`);
+    k.expr(p.at, `pointers[${i}].at`);
+    k.color(p.color, `pointers[${i}]`);
+  });
+  k.optExpr(c.steps, "steps");
+  k.optExpr(c.speed, "speed");
+  if (c.message !== undefined) {
+    if (typeof c.message !== "string") k.add("message: must be a string with {expr} parts");
+    else for (const m of c.message.matchAll(/\{([^}]+)\}/g)) k.expr(m[1], "message");
+  }
+  k.readouts(c.readouts, spec);
+  return k.problems;
+}
+
+export function validateDataStructure(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, ["t"]);
+  k.defs(c.defs);
+  if (!STRUCTURES.includes(c.kind as Structure)) k.add(`kind: must be one of ${STRUCTURES.join(", ")}`);
+  const ops = Array.isArray(c.ops) ? c.ops : [];
+  if (!ops.length || ops.length > 24) k.add("ops: 1–24 operations are required");
+  const allowed: Record<string, string[]> = {
+    stack: ["push", "pop", "search"],
+    queue: ["enqueue", "dequeue", "search"],
+    "linked-list": ["insert", "delete", "search"],
+    bst: ["insert", "delete", "search"],
+    "min-heap": ["insert", "pop"],
+    "hash-table": ["insert", "delete", "search"],
+  };
+  ops.forEach((o, i) => {
+    if (!isObj(o)) return k.add(`ops[${i}]: must be { op, value? }`);
+    const ok = allowed[c.kind as string] ?? STRUCTURE_OPS;
+    if (!ok.includes(o.op as string)) k.add(`ops[${i}].op: ${String(c.kind)} supports ${ok.join(", ")}`);
+    if (o.op !== "pop" && o.op !== "dequeue") k.expr(o.value, `ops[${i}].value`);
+  });
+  k.optExpr(c.buckets, "buckets");
+  k.optExpr(c.hash, "hash", ["key", "m"]);
+  k.optExpr(c.speed, "speed");
+  k.readouts(c.readouts, spec, ["step", "steps", "size", "comparisons", "height", "collisions", "maxChain", "found", "top", "done"]);
+  return k.problems;
+}
+
+// ---------------------------------------------------------------------------
 // Docs (what the planner reads; keep them short and exact)
 // ---------------------------------------------------------------------------
 
@@ -429,7 +775,7 @@ export const DOCS = {
   },
   "ode-sim": {
     when: "motion or change over time from a differential equation: falling bodies, projectiles, springs, pendulums, orbits, growth/decay, energy bookkeeping (T, U, T+U), Euler-vs-exact stepping.",
-    configDoc: `{ defs?, state: { var: initial } , deriv: { var: "d(var)/dt expr" } (RK4), dt? (0.005), speed? (sim s per real s, 1), tMax? (restart after), stop?: "expr" (hold 1.5 s then restart when true, e.g. "y < 0"), scene?: { x: [min,max], y: [min,max], equal?, ground?: y, bodies?: [{ x: expr, y: expr, label?, r? px, trail?, color? }], links?: [{ x1,y1,x2,y2, kind?: line|spring, dashed? }], arrows?: [{ x,y,dx,dy, label?, color? }] }, plot?: { y: [{ expr, label?, color?, dashed? }], min?, max?, span? s }, readouts }. Variables: state vars, t. With both scene and plot they are drawn side by side. ${EXPR_NOTE}`,
+    configDoc: `{ defs?, state: { var: initial } , deriv: { var: "d(var)/dt expr" } (RK4), dt? (0.005), speed? (sim s per real s, 1), tMax? (restart after), stop?: "expr" (hold 1.5 s then restart when true, e.g. "y < 0"), scene?: { x: [min,max], y: [min,max], equal?, ground?: y, bodies?: [{ x: expr, y: expr, label?, r? px, trail?, color? }], links?: [{ x1,y1,x2,y2, kind?: line|spring, dashed? }], arrows?: [{ x,y,dx,dy, label?, color? }] }, plot?: { y: [{ expr, label?, color?, dashed? }], min?, max?, span? s }, readouts }. Variables: state vars, t. With both scene and plot they are drawn side by side. Expressions, defs, readouts: as in function-plot.`,
     example: {
       state: { y: "h", v: 0 },
       deriv: { y: "v", v: "-g" },
@@ -441,7 +787,7 @@ export const DOCS = {
   },
   "vector-diagram": {
     when: "2-D vectors: components, sums and differences, dot/cross products, projections, angles, rotations of a vector by a parameter.",
-    configDoc: `{ defs?, range: half-width in units, vectors: [{ name, x: expr, y: expr, from?: earlierName (tail at its head) | [x, y], label?, color?, dashed? }] (1–6; later vectors may use earlier ones), angle?: [a, b] (arc between), projection?: { of, onto }, grid?, readouts }. Each vector name is a value [x, y] and gives name_x, name_y, name_len, name_ang (degrees). Extra functions: dot(a,b), cross(a,b), norm(a), angle(a,b) (degrees). Variables: t. ${EXPR_NOTE}`,
+    configDoc: `{ defs?, range: half-width in units, vectors: [{ name, x: expr, y: expr, from?: earlierName (tail at its head) | [x, y], label?, color?, dashed? }] (1–6; later vectors may use earlier ones), angle?: [a, b] (arc between), projection?: { of, onto }, grid?, readouts }. Each vector name is a value [x, y] and gives name_x, name_y, name_len, name_ang (degrees). Extra functions: dot(a,b), cross(a,b), norm(a), angle(a,b) (degrees). Variables: t. Expressions, defs, readouts: as in function-plot.`,
     example: {
       range: 5,
       vectors: [
@@ -455,7 +801,7 @@ export const DOCS = {
   },
   "matrix-ops": {
     when: "small matrix computations shown as heatmaps: attention (QKᵀ, scaling, masking, softmax, ·V), linear layers, transposes, normalisation — with seeded random inputs and token labels.",
-    configDoc: `{ seed?, labels?: { rows?: string[], cols?: string[] } (token names), inputs: { Name: { rows, cols, init?: random|identity|zeros|ones|causal|"expr in i,j", std?, values?: number[][] } }, steps: [{ name, op: matmul|transpose|scale|softmax|mask|add|relu|layernorm|map, a, b? (matmul/add), by? (scale), expr? (map: v,i,j; mask: keep-condition in i,j, default causal j<=i), label? }], show: [names to draw, in order], highlightRow?: Num, values?: show numbers in cells, readouts }. Matrices are values; functions: get(M,i,j), rowsum(M,i), rowmax(M,i), rowmin(M,i), argmax(M,i), entropy(M,i), var(M), rows(M), cols(M). ${EXPR_NOTE}`,
+    configDoc: `{ seed?, labels?: { rows?: string[], cols?: string[] } (token names), inputs: { Name: { rows, cols, init?: random|identity|zeros|ones|causal|"expr in i,j", std?, values?: number[][] } }, steps: [{ name, op: matmul|transpose|scale|softmax|mask|add|relu|layernorm|map, a, b? (matmul/add), by? (scale), expr? (map: v,i,j; mask: keep-condition in i,j, default causal j<=i), label? }], show: [names to draw, in order], highlightRow?: Num, values?: show numbers in cells, readouts }. Matrices are values; functions: get(M,i,j), rowsum(M,i), rowmax(M,i), rowmin(M,i), argmax(M,i), entropy(M,i), var(M), rows(M), cols(M). Expressions, defs, readouts: as in function-plot.`,
     example: {
       seed: 7,
       labels: { rows: ["the", "cat", "sat", "on"], cols: ["the", "cat", "sat", "on"] },
@@ -474,7 +820,7 @@ export const DOCS = {
   },
   "sim-histogram": {
     when: "chance and statistics: repeated random trials (coins, dice, sums, random walks, sampling) building a histogram that approaches an expected distribution; law of large numbers.",
-    configDoc: `{ seed?, trial: "expr per trial" (random: rand() uniform 0–1, randn() normal, randint(a,b) inclusive, coin(p) 0/1; repeat(n, expr) sums n draws), trials: total, perSecond? (animation rate), bins?: "integer" | { min, max, count? } (integer when values are whole), expected?: "expr in x" (probability per integer x, or density for continuous bins) drawn as a line, xLabel?, readouts }. Variables: n (trials so far), mean, sd, last; frac(lo, hi) = share of results in [lo, hi] — these change while trials accumulate, so never use them in expect (expect only param-derived readouts like k*p). ${EXPR_NOTE}`,
+    configDoc: `{ seed?, trial: "expr per trial" (random: rand() uniform 0–1, randn() normal, randint(a,b) inclusive, coin(p) 0/1; repeat(n, expr) sums n draws), trials: total, perSecond? (animation rate), bins?: "integer" | { min, max, count? } (integer when values are whole), expected?: "expr in x" (probability per integer x, or density for continuous bins) drawn as a line, xLabel?, readouts }. Variables: n (trials so far), mean, sd, last; frac(lo, hi) = share of results in [lo, hi] — these change while trials accumulate, so never use them in expect (expect only param-derived readouts like k*p). Expressions, defs, readouts: as in function-plot.`,
     example: {
       seed: 3,
       trial: "repeat(k, coin(p))",
@@ -487,7 +833,7 @@ export const DOCS = {
   },
   "table-bars": {
     when: "comparing a few cases by formulas: complexity per layer type, costs per strategy, values of a law for several inputs — a small table with computed columns and a bar chart of one column.",
-    configDoc: `{ defs?, rows: [{ label, vars?: { name: Num } }] (1–10), columns: [{ id, label, expr (row vars, params, row = index), digits?, unit? }] (1–5), bar?: { column: id, log? }, highlight?: row index Num, readouts }. Functions: cell(row, 'colId'), col('colId') (array). ${EXPR_NOTE}`,
+    configDoc: `{ defs?, rows: [{ label, vars?: { name: Num } }] (1–10), columns: [{ id, label, expr (row vars, params, row = index), digits?, unit? }] (1–5), bar?: { column: id, log? }, highlight?: row index Num, readouts }. Functions: cell(row, 'colId'), col('colId') (array). Expressions, defs, readouts: as in function-plot.`,
     example: {
       rows: [
         { label: "self-attention", vars: { ops: "n^2*d", path: 1 } },
@@ -504,13 +850,86 @@ export const DOCS = {
   },
   "algorithm-steps": {
     when: `step-through of a classic algorithm on a small input: ${ALGORITHMS.join(", ")} — cells/pointers or a small graph, the code line being executed, and counters.`,
-    configDoc: `{ algorithm: ${ALGORITHMS.join("|")}, array?: number[] (2–16) | { n, seed?, max?, sorted? }, target? (searches, two-pointers sum), graph?: { nodes: string[] (≤12), edges: [[a,b]], start, directed? } (bfs/dfs), speed? (steps per second, default 1), code? (show pseudocode, default true), defs?, readouts }. Readout variables: step, steps, comparisons, swaps, done (0/1), found (index or -1), n, lo, hi, mid, i, j, visited, frontier. ${EXPR_NOTE}`,
+    configDoc: `{ algorithm: ${ALGORITHMS.join("|")}, array?: number[] (2–16) | { n, seed?, max?, sorted? }, target? (searches, two-pointers sum), graph?: { nodes: string[] (≤12), edges: [[a,b]], start, directed? } (bfs/dfs), speed? (steps per second, default 1), code? (show pseudocode, default true), defs?, readouts }. Readout variables: step, steps, comparisons, swaps, done (0/1), found (index or -1), n, lo, hi, mid, i, j, visited, frontier. Expressions, defs, readouts: as in function-plot.`,
     example: {
       algorithm: "binary-search",
       array: { n: 15, seed: 3, sorted: true },
       target: "target",
       speed: "speed",
       readouts: { comparisons: "comparisons", bound: "ceil(log2(n + 1))", found: "found" },
+    },
+  },
+  "calculus-plot": {
+    when: "derivatives and integrals of one curve: secant → tangent, slope at a point, Riemann sums approaching an area, area under a curve, stacked s → v → a graphs.",
+    configDoc: `{ defs?, f: "expr in x", x: { min, max, label? }, y?: { min?, max?, label? }, label?, at?: Num (point a; may use u), tangent?, secant?: { h: Num }, riemann?: { from, to, n, rule?: left|right|mid|trap }, area?: { from, to } (shaded), panels?: ["derivative", "integral"] (stacked below, same x; integral from x.min), sweep?: { seconds? } (u 0→1), readouts }. Readout variables: a, fa = f(a), slope = f'(a), secant = (f(a+h)−f(a))/h, h, riemann (sum), exact (∫ over the riemann range), error = riemann − exact, area (∫ over area range), n. Expressions, defs, readouts: as in function-plot.`,
+    example: {
+      f: "16*x^2",
+      x: { min: 0, max: 6, label: "t (s)" },
+      y: { label: "s (ft)" },
+      at: "t0",
+      tangent: true,
+      secant: { h: "h" },
+      readouts: { v: { expr: "slope", digits: 2, unit: "ft/s" }, avg: { expr: "secant", digits: 2, unit: "ft/s" } },
+    },
+  },
+  "parametric-plot": {
+    when: "curves x(s), y(s) or polar r(θ): orbits, ellipses, paths, cycloids, phase portraits; a moving point with its velocity, a swept sector (equal areas), a vector field.",
+    configDoc: `{ defs?, view: { x: [min,max], y: [min,max], equal? (same scale), xLabel?, yLabel? }, curves: [{ x: "expr in s", y: "expr in s" } | { r: "expr in s" (polar, s = angle) }, plus s: [from, to], label?, color?, dashed?] (1–4), field?: { u: "expr in x,y", v, n? (arrows per side, 12), normalize?, color? }, point?: { curve? (index, 0), s: Num (may use u), label?, velocity? (arrow), trail?: Num (s-span drawn bold), sector?: { cx, cy, span } (shades the region swept from s−span to s around (cx, cy)) }, points?: [{ x, y, label? }], sweep?: { seconds? } (u 0→1), readouts }. Readout variables: s, px, py, vx, vy, speed, r and theta (from the origin), sector (its area), length (arc length of the point's curve up to s). Expressions, defs, readouts: as in function-plot.`,
+    example: {
+      defs: { b: "a*sqrt(1-e^2)", c: "a*e" },
+      view: { x: [-2.2, 1.2], y: [-1.2, 1.2], equal: true },
+      curves: [{ x: "a*cos(s) - c", y: "b*sin(s)", s: [0, "2*pi"], label: "orbit" }],
+      point: { s: "2*pi*u", label: "P", velocity: true, sector: { cx: 0, cy: 0, span: 0.6 } },
+      points: [{ x: 0, y: 0, label: "sun" }],
+      sweep: { seconds: 8 },
+      readouts: { area: { expr: "sector", digits: 3 }, dist: { expr: "r", digits: 2 } },
+    },
+  },
+  geometry: {
+    when: "constructions from named points: triangles, circles, chords, angles, polygons and areas, levers, force or kick polygons — points, segments and circles that move with parameters.",
+    configDoc: `{ defs?, view?: { x: [min,max], y: [min,max] } (auto-fit), points: [{ name, x: Num, y: Num, label?, hidden?, color? }] (later points may use earlier ones: A, A_x, A_y), shapes?: [{ kind: segment|ray|line, from, to, label?, color?, dashed?, arrow? } | { kind: circle, center, r } | { kind: polygon, points: [names], fill? } | { kind: angle, at, from, to, label? } | { kind: arc, center, r, from, to (degrees) }], grid?, sweep?: { seconds? } (u 0→1), readouts }. A point name is a value [x, y]; functions: dist(A, B), ang(A, O, B) (degrees at O), area(A, B, C, …), mid(A, B), dir(A, B) (degrees). Expressions, defs, readouts: as in function-plot.`,
+    example: {
+      points: [
+        { name: "A", x: 0, y: 0, label: "A" },
+        { name: "B", x: 4, y: 0, label: "B" },
+        { name: "C", x: "4*cos(rad(th))", y: "4*sin(rad(th))", label: "C" },
+      ],
+      shapes: [
+        { kind: "polygon", points: ["A", "B", "C"], fill: true },
+        { kind: "angle", at: "A", from: "B", to: "C", label: "θ" },
+        { kind: "circle", center: "A", r: 4, dashed: true },
+      ],
+      readouts: { bc: { expr: "dist(B, C)", digits: 2 }, area: { expr: "area(A, B, C)", digits: 2 } },
+    },
+  },
+  sequence: {
+    when: "sequences and series: terms aₙ (explicit or a recurrence), partial sums approaching a limit, iterates of a numerical method in a table (Euler steps, Newton's method, interest, Fibonacci).",
+    configDoc: `{ defs?, state?: { var: initial (n = 0) }, next?: { var: "update expr" } (applied each step; sees the current state and n), term?: "expr in n and state" (default: the first state var), n: Num (terms, ≤ 200), show?: terms|sum|both (default both), limit?: Num (dashed line), table?: { columns: [n|term|S|state vars], rows? (≤ 12) }, speed?: Num (terms per second, 2), label?, xLabel?, readouts }. Terms are revealed one by one, then the run repeats. Readout variables: n (revealed index), N, term, S (partial sum to n), state vars at n — these change while terms are revealed, so in expect use only term_N, S_N (final values), limit or param-derived readouts. Expressions, defs, readouts: as in function-plot.`,
+    example: {
+      term: "d * r^n",
+      n: 12,
+      limit: "d / (1 - r)",
+      table: { columns: ["n", "term", "S"], rows: 6 },
+      readouts: { sum: { expr: "S", digits: 4 }, gap: { expr: "limit - S", digits: 4 } },
+    },
+  },
+  "cell-grid": {
+    when: "rows of cells by formula: bits and bit fields (masks, shifts, two's complement), memory words (header/payload/padding), buckets, a row filled step by step with pointers.",
+    configDoc: `{ defs?, rows: [{ label?, n: Num (cells, ≤ 64), value: "expr in i (and k)" (number or string), style?: "expr in i → 0 normal | 1 active | 2 muted | 3 done", index?: "expr in i" (label under; default i), groups?: [{ from, to, label, color? }] (brackets above) }] (1–4), pointers?: [{ row?, at: Num, label, color? }], steps?: Num (animate k = 0…steps−1), speed?: Num (steps per second, 1), message?: "text with {expr} parts", readouts }. Functions: bit(x, i), band(a,b), bor, bxor, bnot(x, bits), shl(x, n), shr(x, n) (integers up to 2^53), hex(x), bin(x, width), str(x), pad(s, width). Variables: k, steps, t (with steps, values that depend on k change over time — keep them out of expect). Expressions, defs, readouts: as in function-plot.`,
+    example: {
+      defs: { word: "bor(size, alloc)" },
+      rows: [{ label: "header (low 8 bits)", n: 8, value: "bit(word, 7 - i)", style: "7 - i < 3 ? 1 : 0", index: "7 - i", groups: [{ from: 0, to: 4, label: "size" }, { from: 5, to: 7, label: "flags" }] }],
+      message: "header = {hex(word)}",
+      readouts: { header: "hex(word)", size: "band(word, bnot(7, 16))" },
+    },
+  },
+  "data-structure": {
+    when: "a data structure under a list of operations: stack, queue, sorted linked list, binary search tree, min-heap (sift up/down), hash table with chaining (collisions, load factor).",
+    configDoc: `{ defs?, kind: ${STRUCTURES.join("|")}, ops: [{ op: push|pop|enqueue|dequeue|insert|delete|search, value?: Num }] (1–24; stack push/pop/search, queue enqueue/dequeue/search, min-heap insert/pop, others insert/delete/search), buckets?: Num (hash-table, 7), hash?: "expr in key, m" (default key mod m), speed?: Num (steps per second, 1), code? (show the operation's pseudocode, default true), readouts }. Readout variables: step, steps, size, comparisons, height (bst/heap), collisions, maxChain (hash-table), found (1/0 for the last search), top (top/front/min value), done — they change as the steps play, so never use them in expect. Expressions, defs, readouts: as in function-plot.`,
+    example: {
+      kind: "bst",
+      ops: [{ op: "insert", value: 50 }, { op: "insert", value: 30 }, { op: "insert", value: 70 }, { op: "insert", value: 20 }, { op: "insert", value: 40 }, { op: "search", value: 40 }],
+      readouts: { height: "height", cmp: "comparisons" },
     },
   },
 } as const;

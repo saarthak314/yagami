@@ -14,6 +14,12 @@ const LOADERS: Record<string, Loader> = {
   "sim-histogram": () => import("./SimHistogram") as unknown as Promise<{ default: TemplateComponent }>,
   "table-bars": () => import("./TableBars") as unknown as Promise<{ default: TemplateComponent }>,
   "algorithm-steps": () => import("./AlgorithmSteps") as unknown as Promise<{ default: TemplateComponent }>,
+  "calculus-plot": () => import("./CalculusPlot") as unknown as Promise<{ default: TemplateComponent }>,
+  "parametric-plot": () => import("./ParametricPlot") as unknown as Promise<{ default: TemplateComponent }>,
+  geometry: () => import("./Geometry") as unknown as Promise<{ default: TemplateComponent }>,
+  sequence: () => import("./Sequence") as unknown as Promise<{ default: TemplateComponent }>,
+  "cell-grid": () => import("./CellGrid") as unknown as Promise<{ default: TemplateComponent }>,
+  "data-structure": () => import("./DataStructure") as unknown as Promise<{ default: TemplateComponent }>,
 };
 
 const cache = new Map<string, TemplateComponent>();

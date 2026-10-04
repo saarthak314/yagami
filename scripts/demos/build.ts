@@ -8,12 +8,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
-import { call, type Effort, MODELS, pool, prewarm, textOf } from "../lib/claude";
+import { call, type Effort, pool, prewarm, roleModel, textOf } from "../lib/claude";
 import type { Anchor, BookConfig, Domain, DemoSpec, Expectation } from "../../src/types";
 import { loadBook } from "../books";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, specSink, tag, textSourceNote, writeJson } from "./common";
 import { emit } from "../lib/report";
 import { domainOf } from "./domains";
+import { DEMO_RULES } from "./rules";
 import type { OutlineDemo, PlanAssembler } from "./plan";
 
 const run = promisify(execFile);
@@ -29,10 +30,9 @@ export interface Convo {
   kind?: "code" | "template";
 }
 
-/** Builder effort for demos made from an outline (YAGAMI_BUILD_EFFORT, default low). */
+/** Builder effort (see roleModel: Sonnet 5.5, medium unless YAGAMI_BUILD_EFFORT / YAGAMI_EFFORT say otherwise). */
 export function buildEffort(): Effort {
-  const e = process.env.YAGAMI_BUILD_EFFORT;
-  return e === "low" || e === "medium" || e === "high" || e === "xhigh" || e === "max" ? e : "low";
+  return roleModel("build").effort;
 }
 
 /**
@@ -62,7 +62,7 @@ const TOO_LONG = "Your reply hit the length limit and was cut off. This demo is 
 /** One builder turn with the output cap; `null` when the reply was cut off at the cap. */
 async function builderTurn(book: BookConfig, effort: Effort, label: string, messages: Anthropic.Beta.BetaMessageParam[]) {
   try {
-    return await call({ model: MODELS.sonnet, effort, label, system: systemPrompt(book), messages, maxTokens: BUILD_MAX_TOKENS });
+    return await call({ model: roleModel("build").model, effort, label, system: systemPrompt(book), messages, maxTokens: BUILD_MAX_TOKENS });
   } catch (e) {
     if (/hit max_tokens/.test((e as Error).message)) return null;
     throw e;
@@ -93,10 +93,12 @@ const warmed = new Map<string, Promise<void>>();
 
 /** Write the builder's ~30k-token system prompt to the cache once, before parallel first calls. */
 export function warmBuilder(book: BookConfig, effort: Effort): Promise<void> {
-  const key = `${book.domain}:${effort}`;
+  // The cache entry belongs to one model + effort + prompt: warm exactly what the builder will send.
+  const { model } = roleModel("build");
+  const key = `${model}:${book.domain}:${effort}`;
   let p = warmed.get(key);
   if (!p) {
-    p = prewarm({ model: MODELS.sonnet, effort, label: `build-warm:${book.slug}`, system: systemPrompt(book) });
+    p = prewarm({ model, effort, label: `build-warm:${book.slug}`, system: systemPrompt(book) });
     warmed.set(key, p);
   }
   return p;
@@ -133,6 +135,9 @@ ${read("src/types.ts")}
 ${read("src/demo/kit.tsx")}
 \`\`\`
 ${examples.length ? `\n## Worked example${examples.length > 1 ? "s" : ""}\n${examples.join("\n\n")}\n` : ""}
+## Robustness
+${DEMO_RULES}
+
 ## Rules
 - The file is src/demos/<book>/<unit>/<Component>.tsx. Default-export a function component named <Component> that takes \`DemoProps\`.
 - Import only from "react", "../../../demo/kit" and "../../../types" (type-only imports from types: \`import type { DemoProps } from "../../../types"\`). No other modules, no assets, no fetch, no DOM APIs beyond what Stage gives you.

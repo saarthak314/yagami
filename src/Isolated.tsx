@@ -1,10 +1,12 @@
 // `/?demo=<book>/<unit>/<demoId>&beat=<index>`: only the demo pane, for
 // automated screenshots. Exposes window.__demoReady, window.__demoErrors and (from the
 // kit's Stage) window.__stageText / __stageSize for layout checks.
+// With `&stress=1`: the stress audit instead (demo/Stress.tsx → window.__stress).
 
 import { useCallback, useEffect, useState } from "react";
 import { planFor } from "./lib/data";
 import { DemoPane } from "./demo/DemoPane";
+import { StressHarness } from "./demo/Stress";
 
 declare global {
   interface Window {
@@ -22,8 +24,13 @@ const push = (e: unknown) => {
 /** Collect every error the page produces into window.__demoErrors. Call once, before render. */
 export function installErrorCapture() {
   window.__demoErrors = [];
-  // Stages record their text boxes (window.__stageText) for the verifier's layout checks.
-  window.__yagamiInstrument = true;
+  if (new URLSearchParams(location.search).get("stress") === "1") {
+    // Stress audit: stages are stepped by hand (no animation loop, no text recording).
+    window.__yagamiStress = true;
+  } else {
+    // Stages record their text boxes (window.__stageText) for the verifier's layout checks.
+    window.__yagamiInstrument = true;
+  }
   window.addEventListener("error", (e) => push(e.error ?? e.message));
   window.addEventListener("unhandledrejection", (e) => push(e.reason));
   const consoleError = console.error.bind(console);
@@ -34,6 +41,22 @@ export function installErrorCapture() {
 }
 
 export function Isolated({ demo, beat }: { demo: string; beat: number }) {
+  const stress = new URLSearchParams(location.search).get("stress") === "1";
+  if (stress) return <StressView demo={demo} />;
+  return <PaneView demo={demo} beat={beat} />;
+}
+
+function StressView({ demo }: { demo: string }) {
+  const [book, unit, demoId] = demo.split("/");
+  const unitKey = `${book}/${unit}`;
+  const spec = planFor(unitKey)?.demos.find((d) => d.id === demoId);
+  useEffect(() => {
+    if (!spec) window.__stress = { done: true, notes: [`stress: unknown demo ${demo}`], scenarios: 0, frames: 0, ms: 0 };
+  }, [spec, demo]);
+  return spec ? <StressHarness unitKey={unitKey} demo={spec} /> : null;
+}
+
+function PaneView({ demo, beat }: { demo: string; beat: number }) {
   const parts = demo.split("/");
   const [book, unit, demoId] = parts;
   const unitKey = `${book}/${unit}`;

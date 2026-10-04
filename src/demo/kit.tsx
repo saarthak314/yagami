@@ -35,7 +35,7 @@ export const theme = {
 // ---------------------------------------------------------------------------
 
 export interface FrameInfo {
-  /** Seconds since last frame, clamped to 1/30. 0 while paused. */
+  /** Seconds since last frame, in [0, 1/30]. 0 while paused. */
   dt: number;
   /** Seconds of simulated (playing) time since mount / last reset. */
   t: number;
@@ -74,8 +74,20 @@ export interface StageTextBox {
   rotated?: boolean;
 }
 
+/** A stage driven by the stress audit (isolated mode `&stress=1`): frames are stepped by hand. */
+export interface StressStage {
+  /** Run one frame with this dt (seconds; 0 while paused, as in the real loop). Throws what the demo throws. */
+  frame(dt: number): void;
+  canvas: HTMLCanvasElement;
+}
+
 declare global {
   interface Window {
+    /** Set by the stress audit: stages don't run their own loop; they register in `__stressStages`. */
+    __yagamiStress?: boolean;
+    __stressStages?: Set<StressStage>;
+    /** Stress audit: how many times fmt() was given a non-finite number. */
+    __fmtNonFinite?: number;
     /** Set by isolated mode: stages record their text boxes each frame. */
     __yagamiInstrument?: boolean;
     /** Text boxes of the last completed frame. */
@@ -154,6 +166,24 @@ export function Stage({
     canvas.height = Math.round(height * dpr);
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    // Stress audit: no loop of its own; the audit steps frames by hand (deterministic time).
+    if (window.__yagamiStress) {
+      const stage: StressStage = {
+        canvas,
+        frame(raw: number) {
+          const dt = playingRef.current ? raw : 0;
+          tRef.current += dt;
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.clearRect(0, 0, width, height);
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          frameRef.current(ctx, { dt, t: tRef.current, width, height });
+        },
+      };
+      const stages = (window.__stressStages ??= new Set());
+      stages.add(stage);
+      return () => void stages.delete(stage);
+    }
     // Isolated mode (automated checks) records every text box drawn per frame; no cost otherwise.
     const instrument = window.__yagamiInstrument === true;
     let boxes: StageTextBox[] = [];
@@ -161,7 +191,10 @@ export function Stage({
     let raf = 0;
     let last = performance.now();
     const tick = (now: number) => {
-      const raw = Math.min((now - last) / 1000, 1 / 30);
+      // rAF timestamps can be slightly earlier than the performance.now() taken when the loop
+      // started, so the first delta can be negative: clamp to [0, 1/30] (a negative dt made
+      // time-based indices -1 in generated demos — the "intermittent" crashes).
+      const raw = Math.max(0, Math.min((now - last) / 1000, 1 / 30));
       last = now;
       const dt = playingRef.current ? raw : 0;
       tRef.current += dt;
@@ -723,11 +756,47 @@ export function scale([d0, d1]: [number, number], [r0, r1]: [number, number]) {
 
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
+/**
+ * The current step of a step-through that advances `speed` steps per second
+ * through `count` steps, holds the last one for `hold` seconds, then loops.
+ * Always an integer in [0, count - 1] (0 when there are no steps) for any t,
+ * speed or count — use it instead of indexing with Math.floor(t * speed).
+ */
+export function stepAt(count: number, t: number, speed = 1, hold = 1.5): number {
+  const n = Math.floor(count);
+  if (!(n > 1) || !Number.isFinite(t) || !(speed > 0)) return 0;
+  const cycle = n - 1 + Math.max(0, hold) * speed;
+  const u = (((t * speed) % cycle) + cycle) % cycle;
+  return Math.min(n - 1, Math.max(0, Math.floor(u)));
+}
+
+/** Clamped, integer index into `arr` (first/last element when out of range); undefined only for an empty array. */
+export function at<T>(arr: readonly T[], i: number): T | undefined {
+  if (!arr.length) return undefined;
+  const k = Number.isFinite(i) ? Math.min(arr.length - 1, Math.max(0, Math.floor(i))) : 0;
+  return arr[k];
+}
+
+/** a / b, or `fallback` when the result isn't a finite number (b = 0, NaN inputs). */
+export function safeDiv(a: number, b: number, fallback = 0): number {
+  const v = a / b;
+  return Number.isFinite(v) ? v : fallback;
+}
+
+/** `v` when it's a finite number, else `fallback` (guards sqrt/log/division results before drawing). */
+export function finite(v: number, fallback = 0): number {
+  return Number.isFinite(v) ? v : fallback;
+}
+
 export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
 /** Format a number for a readout: fixed digits, or exponent form when very small/large. */
 export function fmt(v: number, digits = 3): string {
-  if (!Number.isFinite(v)) return "—";
+  if (!Number.isFinite(v)) {
+    // The stress audit counts these: a readout computed from NaN/Infinity shows "—" but is still a bug.
+    if (window.__yagamiStress) window.__fmtNonFinite = (window.__fmtNonFinite ?? 0) + 1;
+    return "—";
+  }
   const a = Math.abs(v);
   if (a !== 0 && (a < 1e-3 || a >= 1e5)) return v.toExponential(2);
   return v.toFixed(digits);

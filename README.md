@@ -66,7 +66,7 @@ When it finishes, any demo that failed comes with the `yagami fix` command to re
    straight back to the model. A model review of one contact sheet runs only when the code checks can't judge it.
    Demos stream through these stages independently, so the first ones are ready while others are still being made.
 
-Models: Claude Opus for the outline, Claude Sonnet for writing and reviewing demos. A short paper typically takes
+Models: Claude Sonnet 5.5 at medium effort for every demo step (outline, code, settings, checks). A short paper typically takes
 about a minute and well under a dollar; spend is shown live and logged to `work/usage.jsonl`.
 
 ## Layout

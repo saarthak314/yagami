@@ -21,6 +21,7 @@ import type { BookConfig, DemoSpec, Expectation } from "../../src/types";
 import { loadConvo, runConvo, saveSpec } from "./build";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
 import { domainOf } from "./domains";
+import { staticAudit } from "./rules";
 
 const HOST = "127.0.0.1";
 /** Preferred port; other local projects often hold it, so any free port is the fallback. */
@@ -310,8 +311,11 @@ async function shootSettled(page: Page, env: VerifyEnv, c: Ctx, demo: DemoSpec, 
     })
     .catch(() => ({ appErrors: [] as unknown[], text: [] as TextBox[], stage: null }));
   for (const e of info.appErrors) errors.push(`app: ${typeof e === "string" ? e : JSON.stringify(e)}`);
+  // The shell shows non-finite readouts as "—" and marks them data-broken: report those as NaN.
   const readouts = await page
-    .$$eval("[data-readout]", (els) => Object.fromEntries(els.map((el) => [el.getAttribute("data-readout") ?? "", (el.textContent ?? "").trim()])))
+    .$$eval("[data-readout]", (els) =>
+      Object.fromEntries(els.map((el) => [el.getAttribute("data-readout") ?? "", el.getAttribute("data-broken") ? "NaN" : (el.textContent ?? "").trim()])),
+    )
     .catch(() => ({}) as Record<string, string>);
   return { beat, anchor: demo.beats[beat].anchor, ready, errors: [...new Set(errors)], readouts, changed, ink, shot, text: info.text, textBefore, stage: info.stage };
 }
@@ -458,24 +462,57 @@ async function contactSheet(shots: CheckShot[], file: string, scale = 0.5): Prom
   return file;
 }
 
-/** Render every beat once (settled) and run the deterministic checks. No model calls. */
+/** Wall-clock limit for one demo's stress audit (it budgets ~3 s of frames; more means it hung). */
+const STRESS_TIMEOUT_MS = 30000;
+
+/**
+ * Stress audit (no model): the demo is driven by hand in isolated mode `&stress=1` — long runs
+ * of every beat, every preset, every control value and extreme combinations, pause/restart,
+ * resizes — and every crash, broken readout or blank stage comes back as a note.
+ * Set YAGAMI_STRESS=off to skip it.
+ */
+async function stressDemo(env: VerifyEnv, c: Ctx, demo: DemoSpec): Promise<string[]> {
+  if (process.env.YAGAMI_STRESS === "off") return [];
+  return env.pages.run(async () => {
+    const page = await env.browser.newPage({ viewport: { width: 1300, height: 1000 }, deviceScaleFactor: 1 });
+    try {
+      await page.goto(`${env.baseUrl}/?demo=${c.book.slug}/${c.unit.unit}/${demo.id}&stress=1`, { waitUntil: "load" });
+      await page.waitForFunction(() => (globalThis as unknown as { __stress?: { done: boolean } }).__stress?.done === true, null, { timeout: STRESS_TIMEOUT_MS });
+      const r = await page.evaluate(() => (globalThis as unknown as { __stress?: { notes: string[] } }).__stress?.notes ?? []);
+      return r;
+    } catch (e) {
+      // A demo that never finishes the audit loops forever or is far too slow per frame.
+      return [`stress: the demo didn't finish the stress run within ${STRESS_TIMEOUT_MS / 1000} s (an endless loop, or frames far too slow): ${String((e as Error).message ?? e).split("\n")[0].slice(0, 120)}`];
+    } finally {
+      await page.close().catch(() => undefined);
+    }
+  });
+}
+
+/** Render every beat once (settled) and run the deterministic checks (incl. the static and stress audits). No model calls. */
 export async function checkDemo(env: VerifyEnv, c: Ctx, demo: DemoSpec, outDir = paths.verifyDir(c.book.slug, c.unit.unit)): Promise<CheckResult> {
   fs.mkdirSync(outDir, { recursive: true });
   env.server.moduleGraph.invalidateAll();
-  const shots = await Promise.all(
-    demo.beats.map((_, i) =>
-      env.pages.run(async () => {
-        const page = await env.browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
-        try {
-          return await shootSettled(page, env, c, demo, i, outDir);
-        } finally {
-          await page.close().catch(() => undefined);
-        }
-      }),
+  // Code first: risky patterns are cheap to find and explain (generated components only).
+  const file = demo.template ? null : paths.component(c.book.slug, c.unit.unit, demo.component);
+  const codeNotes = file && fs.existsSync(file) ? staticAudit(fs.readFileSync(file, "utf8")) : [];
+  const [shots, stressNotes] = await Promise.all([
+    Promise.all(
+      demo.beats.map((_, i) =>
+        env.pages.run(async () => {
+          const page = await env.browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
+          try {
+            return await shootSettled(page, env, c, demo, i, outDir);
+          } finally {
+            await page.close().catch(() => undefined);
+          }
+        }),
+      ),
     ),
-  );
+    stressDemo(env, c, demo),
+  ]);
   const expect = (demo.expect ?? []).filter((e) => e.beat >= 0 && e.beat < demo.beats.length);
-  const notes = groupNotes(shots.map((s) => ({ beat: s.beat, notes: findings(demo, s, expect) })));
+  const notes = [...codeNotes, ...groupNotes(shots.map((s) => ({ beat: s.beat, notes: findings(demo, s, expect) }))), ...stressNotes];
   const sheet = await contactSheet(shots, path.join(outDir, `${demo.id}-sheet.png`));
   return { ok: notes.length === 0, notes, needsReview: notes.length === 0, shots, sheet };
 }

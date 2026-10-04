@@ -37,7 +37,7 @@ export interface RunOpts {
   note?: string;
   /** Verify → revise rounds per demo (default 2). */
   rounds?: number;
-  /** Demos in flight at once across the whole run (default 8). */
+  /** Demos in flight at once across the whole run (default 12, or YAGAMI_CONCURRENCY). */
   concurrency?: number;
   /** Redo steps even when their inputs are unchanged. */
   force?: boolean;
@@ -56,6 +56,17 @@ export interface RunResult {
 
 export const DEFAULT_STEPS: Stage[] = ["render", "anchors", "assemble", "plan", "build", "verify"];
 
+/**
+ * Demos in flight at once across the run (each holds its slot for spec+code, checks and review).
+ * 12 keeps a two-chapter book's demos from queueing while staying well inside API rate limits;
+ * YAGAMI_CONCURRENCY overrides.
+ */
+const DEMO_PARALLEL = 12;
+/** Units making demos side by side; their demos are bounded globally by `concurrency`. */
+const UNIT_PARALLEL = 3;
+/** Units whose pages are being made at once (rendering and OCR already use every core per unit). */
+const CONTENT_PARALLEL = 2;
+
 export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promise<RunResult> {
   const restore = setEmit(emitFn);
   const t0 = Date.now();
@@ -73,10 +84,25 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
     const steps = new Set(opts.steps?.length ? opts.steps : DEFAULT_STEPS);
     emit({ type: "book", slug, title: book.title, units, domain: book.domain, kind: book.source.kind });
 
-    // Content: cheap and local; do every unit first so the reader is usable early.
-    const contentOk = new Set<string>();
-    const codeHash = contentCodeHash();
+    // The subject (still being detected for a new book) picks the demo prompts: content runs meanwhile.
+    const domainReady = opts.domain
+      ? opts.domain.then(
+          (d) => void (book.domain = d),
+          () => undefined, // detection failed: the local guess in book.domain stands
+        )
+      : Promise.resolve();
+    const demoLimit = new Limit(opts.concurrency ?? (Number(process.env.YAGAMI_CONCURRENCY) || DEMO_PARALLEL));
+    const getEnv = () => (env ??= startEnv());
+    const wantsDemos = steps.has("plan") || steps.has("build") || steps.has("verify") || !!opts.note;
+
+    // A run that will make demos (fresh book, force, a fix) starts the browser and warms the
+    // builder's prompt cache now, overlapping the content steps instead of waiting for them.
+    const makesDemos = wantsDemos && (!!opts.force || !!opts.note || units.some((u) => !fs.existsSync(paths.plan(slug, u))));
+    if (makesDemos && steps.has("verify")) void getEnv();
+    if (makesDemos && steps.has("plan") && steps.has("build") && !legacyPlanner()) void domainReady.then(() => warmBuilder(book, buildEffort()));
+
     // Sharper page variants render in the background once a unit's base pages are ready.
+    const codeHash = contentCodeHash();
     const background: Promise<void>[] = [];
     const variantsLater = (unit: string, key: string) => {
       if (!steps.has("assemble") || readCache(slug, unit).variants === key) return;
@@ -87,7 +113,9 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
           .catch((e: Error) => emit({ type: "log", level: "warn", message: `sharper pages for ${unit} failed: ${e.message}` })),
       );
     };
-    for (const unit of units) {
+
+    /** Pages + anchors for one unit (skipped when unchanged). Returns whether the unit is usable. */
+    const content = async (unit: string): Promise<boolean> => {
       try {
         // Skip pages + anchors when nothing they depend on changed (PDF, book settings, content code).
         const u = unitOf(book, unit);
@@ -95,9 +123,8 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
         if (!opts.force && readCache(slug, unit).content === key && fs.existsSync(unitJsonPath(slug, unit))) {
           for (const stage of ["render", "anchors", "assemble"] as const)
             if (steps.has(stage)) emit({ type: "stage", unit, stage, status: "skip", detail: "unchanged" });
-          contentOk.add(unit);
           variantsLater(unit, key);
-          continue;
+          return true;
         }
         for (const [stage, fn] of [
           ["render", renderUnit],
@@ -116,24 +143,24 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
           });
           variantsLater(unit, key);
         }
-        contentOk.add(unit);
+        return true;
       } catch (e) {
         emit({ type: "stage", unit, stage: "anchors", status: "error", detail: (e as Error).message });
         failures.push(`${slug}/${unit} content: ${(e as Error).message}`);
+        return false;
       }
-    }
+    };
 
-    if (opts.domain) book.domain = await opts.domain;
-
-    const demoLimit = new Limit(opts.concurrency ?? 8);
-    const getEnv = () => (env ??= startEnv());
-    const wantsDemos = steps.has("plan") || steps.has("build") || steps.has("verify") || !!opts.note;
-
-    // Demo work: units in parallel (each streams its own plan), demos bounded globally.
-    await pool([...contentOk], 3, async (unit) => {
-      if (!wantsDemos) return;
+    // Pages for every unit (cheap, local; bounded, earliest unit first) so the whole book is
+    // readable early. Each unit's demos start as soon as its own pages are ready; up to
+    // UNIT_PARALLEL units make demos side by side, sharing one global demo limit.
+    const contentLimit = new Limit(CONTENT_PARALLEL);
+    const pagesReady = new Map(units.map((u, i) => [u, contentLimit.run(() => content(u), i)]));
+    await pool(units, UNIT_PARALLEL, async (unit, i) => {
+      if (!(await pagesReady.get(unit)) || !wantsDemos) return;
+      await domainReady;
       try {
-        const results = await runUnitDemos(book, unit, steps, opts, demoLimit, getEnv);
+        const results = await runUnitDemos(book, unit, steps, opts, demoLimit, getEnv, i);
         for (const r of results) if (!r.ok) failures.push(`${slug}/${unit} ${r.id}: ${r.why}`);
       } catch (e) {
         emit({ type: "stage", unit, stage: "plan", status: "error", detail: (e as Error).message });
@@ -141,6 +168,7 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
       }
     });
 
+    await Promise.all(pagesReady.values());
     await Promise.all(background); // usually long done: variants are quicker than demos
     const seconds = (Date.now() - t0) / 1000;
     emit({ type: "done", seconds, cost, failures });
@@ -166,6 +194,8 @@ async function runUnitDemos(
   opts: RunOpts,
   limit: Limit,
   getEnv: () => Promise<VerifyEnv>,
+  /** Lower runs first when demos wait for a slot (the unit's position in the book). */
+  priority = 0,
 ): Promise<DemoOutcome[]> {
   const slug = book.slug;
   const tasks: Promise<DemoOutcome>[] = [];
@@ -187,7 +217,7 @@ async function runUnitDemos(
         if (doBuild) emit({ type: "progress", unit, stage: "build", done: ++built, total, label: "demos" });
         if (doVerify) emit({ type: "progress", unit, stage: "verify", done: ++verified, total, label: "demos" });
         return out;
-      }),
+      }, priority),
     );
   };
 
@@ -202,7 +232,7 @@ async function runUnitDemos(
         if (doBuild) emit({ type: "progress", unit, stage: "build", done: ++built, total, label: "demos" });
         if (doVerify) emit({ type: "progress", unit, stage: "verify", done: ++verified, total, label: "demos" });
         return out;
-      }),
+      }, priority),
     );
   };
 

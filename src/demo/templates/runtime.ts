@@ -1,6 +1,7 @@
 // Shared pieces for template components: parameter environments, defs, readouts, ticks.
 
 import type { DemoProps, Params } from "../../types";
+import { axes } from "../kit";
 import { compile, compileField, evalNum, num, type Compiled, type Env, type Value } from "./expr";
 import type { ReadoutDef } from "./configs";
 
@@ -138,3 +139,92 @@ export const textWidth = (ctx: CanvasRenderingContext2D, s: string, font = '11px
 };
 
 export { num };
+
+// ---------------------------------------------------------------------------
+// Plot frames (shared by calculus-plot and parametric-plot)
+// ---------------------------------------------------------------------------
+
+export interface Frame {
+  px: (x: number) => number;
+  py: (y: number) => number;
+  box: { left: number; top: number; width: number; height: number };
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+}
+
+/**
+ * Axes with nice ticks inside `area` (labels included). `equal` widens one range so both axes share a scale.
+ * `rightPad` reserves room for curve labels at the right edge.
+ */
+export function plotFrame(
+  ctx: CanvasRenderingContext2D,
+  area: { left: number; top: number; width: number; height: number },
+  o: { x: [number, number]; y: [number, number]; xLabel?: string; yLabel?: string; equal?: boolean; rightPad?: number; xTicks?: boolean },
+): Frame {
+  let [x0, x1] = o.x;
+  let [y0, y1] = o.y;
+  if (!(Number.isFinite(x0) && Number.isFinite(x1) && x1 > x0)) [x0, x1] = [0, 1];
+  if (!(Number.isFinite(y0) && Number.isFinite(y1) && y1 > y0)) [y0, y1] = [0, 1];
+  const yTicks0 = niceTicks(y0, y1, Math.max(2, Math.floor((area.height - 50) / 46)));
+  const yLabels0 = yTicks0.map((v) => fmtTick(v, yTicks0));
+  const left = area.left + 18 + Math.max(16, ...yLabels0.map((s) => textWidth(ctx, s)));
+  const xLabelW = o.xLabel ? textWidth(ctx, o.xLabel, '11px "Geist Variable", system-ui, sans-serif') + 26 : 0;
+  const right = Math.max(18, xLabelW, o.rightPad ?? 0);
+  const top = area.top + (o.yLabel ? 30 : 14);
+  const bottom = o.xTicks === false ? 14 : 34;
+  const box = { left, top, width: Math.max(40, area.left + area.width - right - left), height: Math.max(30, area.top + area.height - bottom - top) };
+  if (o.equal) {
+    // Same units per pixel on both axes: grow the range that is too small for its side.
+    const sx = (x1 - x0) / box.width;
+    const sy = (y1 - y0) / box.height;
+    if (sx > sy) {
+      const pad = (sx * box.height - (y1 - y0)) / 2;
+      y0 -= pad;
+      y1 += pad;
+    } else {
+      const pad = (sy * box.width - (x1 - x0)) / 2;
+      x0 -= pad;
+      x1 += pad;
+    }
+  }
+  const xTicks = niceTicks(x0, x1, Math.max(2, Math.floor((box.width - 40) / 90)));
+  const yTicks = niceTicks(y0, y1, Math.max(2, Math.floor((box.height - 20) / 46)));
+  const xl = xTicks.map((v) => fmtTick(v, xTicks));
+  const yl = yTicks.map((v) => fmtTick(v, yTicks));
+  const ax = axes(ctx, box, {
+    xDomain: [x0, x1],
+    yDomain: [y0, y1],
+    xTicks: o.xTicks === false ? [] : xTicks,
+    yTicks,
+    xFormat: (v) => xl[xTicks.indexOf(v)] ?? "",
+    yFormat: (v) => yl[yTicks.indexOf(v)] ?? "",
+    xLabel: o.xLabel,
+    yLabel: o.yLabel,
+    grid: true,
+  });
+  return { px: ax.x, py: ax.y, box, x0, x1, y0, y1 };
+}
+
+/** Finite min/max of values (with a fallback when there are none). */
+export function extent(values: number[], fallback: [number, number] = [0, 1]): [number, number] {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const v of values)
+    if (Number.isFinite(v)) {
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+  if (!(hi >= lo)) return fallback;
+  if (hi === lo) return [lo - (Math.abs(lo) || 1) * 0.5, hi + (Math.abs(hi) || 1) * 0.5];
+  return [lo, hi];
+}
+
+/** A shared loop clock for step animations: elapsed steps with a hold at the end, then repeat. */
+export function stepIndex(t: number, count: number, perSecond: number, hold = 1.6): number {
+  if (count <= 1) return 0;
+  const cycle = (count - 1) / perSecond + hold;
+  const s = ((t % cycle) + cycle) % cycle;
+  return Math.min(count - 1, Math.floor(s * perSecond));
+}

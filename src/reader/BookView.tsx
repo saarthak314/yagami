@@ -181,7 +181,10 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
       const b = beats[i];
       if (!b) return;
       if (pinned !== null) setPinned(i);
-      reader.current?.scrollToAnchor(b.anchor.id, smooth);
+      // Hold the target as the current step while the page scrolls there: other demos' paragraphs pass the
+      // reading line on the way, and a quick second j/k must step from the target, not from them.
+      setFrozen(i);
+      reader.current?.scrollToAnchor(b.anchor.id, smooth, () => setFrozen((f) => (f === i ? null : f)));
     },
     [beats, pinned],
   );

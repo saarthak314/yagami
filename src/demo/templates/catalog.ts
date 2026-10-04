@@ -5,7 +5,13 @@ import type { DemoSpec } from "../../types";
 import {
   DOCS,
   validateAlgorithmSteps,
+  validateCalculusPlot,
+  validateCellGrid,
+  validateDataStructure,
   validateFunctionPlot,
+  validateGeometry,
+  validateParametricPlot,
+  validateSequence,
   validateMatrixOps,
   validateOdeSim,
   validateSimHistogram,
@@ -44,6 +50,12 @@ export const TEMPLATES: TemplateInfo[] = [
   entry("sim-histogram", "Random trials", validateSimHistogram),
   entry("table-bars", "Table and bars", validateTableBars),
   entry("algorithm-steps", "Algorithm step-through", validateAlgorithmSteps),
+  entry("calculus-plot", "Derivative and integral", validateCalculusPlot),
+  entry("parametric-plot", "Parametric and polar curves", validateParametricPlot),
+  entry("geometry", "Geometric construction", validateGeometry),
+  entry("sequence", "Sequence and series", validateSequence),
+  entry("cell-grid", "Cells, bits and words", validateCellGrid),
+  entry("data-structure", "Data structure operations", validateDataStructure),
 ];
 
 export function templateInfo(id: string | undefined): TemplateInfo | undefined {

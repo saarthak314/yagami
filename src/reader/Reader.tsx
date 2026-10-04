@@ -46,7 +46,8 @@ export function textCrop(unit: Unit): { width: number; left: Map<PageLabel, numb
 }
 
 export interface ReaderHandle {
-  scrollToAnchor: (id: string, smooth?: boolean) => void;
+  /** `onSettle` runs once the scroll has come to rest (or right away when there's nothing to animate). */
+  scrollToAnchor: (id: string, smooth?: boolean, onSettle?: () => void) => void;
   /** Scroll to a section; if `preferAnchor` starts shortly below its heading, put that paragraph on the reading line instead. */
   scrollToSection: (id: SectionId, smooth?: boolean, preferAnchor?: string) => void;
   /** Scroll so that fraction `f` of page `i` is on the reading line. */
@@ -235,9 +236,27 @@ export function Reader({ unit, markers, active, zoom, fit, flashKey, bottomInset
   useImperativeHandle(
     ref,
     () => ({
-      scrollToAnchor: (id, smooth = true) => {
+      scrollToAnchor: (id, smooth = true, onSettle) => {
         const a = unit.anchors.find((x) => x.id === id);
         if (a) scrollTo(a.page, a.y, smooth);
+        const s = scroller.current;
+        if (!onSettle) return;
+        if (!s || !a || !smooth) return void requestAnimationFrame(() => onSettle());
+        // Settled = no scroll events for a moment (smooth scrolling fires them every frame), capped.
+        let quiet: ReturnType<typeof setTimeout> | undefined;
+        const done = () => {
+          clearTimeout(quiet);
+          clearTimeout(cap);
+          s.removeEventListener("scroll", onScroll);
+          onSettle();
+        };
+        const onScroll = () => {
+          clearTimeout(quiet);
+          quiet = setTimeout(done, 140);
+        };
+        const cap = setTimeout(done, 1600);
+        s.addEventListener("scroll", onScroll, { passive: true });
+        quiet = setTimeout(done, 200); // nothing to scroll (already there)
       },
       scrollToSection: (id, smooth = false, preferAnchor) => {
         const sec = unit.sections.find((x) => x.id === id);

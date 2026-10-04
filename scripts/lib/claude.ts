@@ -10,14 +10,34 @@ import path from "node:path";
 export const client = new Anthropic({ maxRetries: 4 });
 
 export const MODELS = {
-  /** Transcription and planning. */
   opus: "claude-opus-5-5",
-  /** Demo building and demo review (user's choice: Sonnet 5.5, medium effort). */
   sonnet: "claude-sonnet-5-5",
 } as const;
 
 export type Model = (typeof MODELS)[keyof typeof MODELS];
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Pipeline roles that call a model. */
+export type Role = "outline" | "plan" | "repair" | "build" | "template" | "review" | "domain";
+
+const ROLE_GROUP: Record<Role, string> = { outline: "PLAN", plan: "PLAN", repair: "PLAN", build: "BUILD", template: "BUILD", review: "REVIEW", domain: "DOMAIN" };
+
+const isEffort = (e: string | undefined): e is Effort => e === "low" || e === "medium" || e === "high" || e === "xhigh" || e === "max";
+
+/**
+ * Model and effort for a role. Every demo step (outline, spec + code, templates, fixes,
+ * reviews) runs on Sonnet 5.5 at medium effort — the user's choice for time and cost.
+ * Experiments can override: YAGAMI_MODEL / YAGAMI_EFFORT for all roles, or per group
+ * YAGAMI_PLAN_* (outline, legacy plan, repair), YAGAMI_BUILD_* (spec + code, templates),
+ * YAGAMI_REVIEW_*, YAGAMI_DOMAIN_* (subject detection, default low effort).
+ */
+export function roleModel(role: Role): { model: Model; effort: Effort } {
+  const g = ROLE_GROUP[role];
+  const m = process.env[`YAGAMI_${g}_MODEL`] ?? process.env.YAGAMI_MODEL;
+  const e = process.env[`YAGAMI_${g}_EFFORT`] ?? process.env.YAGAMI_EFFORT;
+  const model = m === "opus" || m === MODELS.opus ? MODELS.opus : MODELS.sonnet;
+  return { model, effort: isEffort(e) ? e : role === "domain" ? "low" : "medium" };
+}
 
 // $ per million tokens: [input, output, cache read, cache write (5m)]
 const PRICES: Record<Model, [number, number, number, number]> = {

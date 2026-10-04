@@ -11,11 +11,12 @@
 
 import { z } from "zod";
 import type Anthropic from "@anthropic-ai/sdk";
-import { call, MODELS, textOf, type Effort } from "../lib/claude";
+import { call, roleModel, textOf, type Effort } from "../lib/claude";
 import type { BookConfig, ControlSpec, DemoPlan, DemoSpec, Expectation, Params, ParamValue } from "../../src/types";
 import { anchorLine, type Ctx, extractJson, loadCtx, log, pageImage, paths, pngBlock, setSpecSink, tag, textSourceNote, writeJson } from "./common";
 import { outlineCatalog as catalogText, templates as loadTemplates } from "./template";
 import { domainOf } from "./domains";
+import { emit } from "../lib/report";
 
 // --- Schema (mirrors DemoPlan in src/types.ts) ------------------------------
 
@@ -403,7 +404,7 @@ export async function planUnit(book: BookConfig, unitId: string, opts: PlanOpts 
       }
     });
     repairs.push(
-      call({ model: MODELS.opus, effort: "low", label: `plan-repair:${t}`, system: systemFor(book), messages: [ask], onText: (d) => scan.push(d) })
+      call({ ...roleModel("repair"), label: `plan-repair:${t}`, system: systemFor(book), messages: [ask], onText: (d) => scan.push(d) })
         .then(() => {
           if (!got) dropped.push({ spec, errors: [...errors, "the repair returned no demo"] });
         })
@@ -438,7 +439,7 @@ export async function planUnit(book: BookConfig, unitId: string, opts: PlanOpts 
     }
   });
   const { message } = await call({
-    model: MODELS.opus,
+    model: roleModel("plan").model,
     effort: opts.effort ?? planEffort(),
     label: `plan:${t}`,
     system: systemFor(book),
@@ -461,10 +462,9 @@ export async function planUnit(book: BookConfig, unitId: string, opts: PlanOpts 
   return { book: book.slug, unit: unitId, demos: accepted };
 }
 
-/** Planner effort: YAGAMI_PLAN_EFFORT (low | medium | high | xhigh | max), default low (benchmarked: half the time and cost of medium, same pass rate). */
+/** Planner/outline effort (see roleModel: Sonnet 5.5, medium unless YAGAMI_PLAN_EFFORT / YAGAMI_EFFORT say otherwise). */
 export function planEffort(): Effort {
-  const e = process.env.YAGAMI_PLAN_EFFORT;
-  return e === "low" || e === "medium" || e === "high" || e === "xhigh" || e === "max" ? e : "low";
+  return roleModel("outline").effort;
 }
 
 
@@ -589,70 +589,148 @@ export interface OutlineOpts {
   onDemo?: (o: OutlineDemo) => void;
 }
 
+/** Units with more content pages than this are outlined in parallel parts (one call per part). */
+const OUTLINE_PART_PAGES = 5;
+/** At most this many parts (each part gets ≥ 2 of the unit's demos). */
+const OUTLINE_MAX_PARTS = 3;
+/** Demos per unit. */
+const MAX_DEMOS = 7;
+
+interface OutlinePart {
+  /** Page labels in this part, in order. */
+  pages: string[];
+  anchors: Ctx["unit"]["anchors"];
+  /** Most demos this part may outline. */
+  cap: number;
+}
+
+/**
+ * Split a unit's content pages into contiguous parts of about OUTLINE_PART_PAGES pages,
+ * cutting at section starts where possible, so long units are outlined in parallel and
+ * outline time doesn't grow with length. Demo caps are shared out by page count.
+ */
+export function outlineParts(c: Ctx, keep: Ctx["unit"]["anchors"]): OutlinePart[] {
+  const pages = c.unit.pages.map((p) => p.label).filter((l) => keep.some((a) => a.page === l));
+  const k = Math.max(1, Math.min(OUTLINE_MAX_PARTS, Math.ceil(pages.length / OUTLINE_PART_PAGES)));
+  if (k === 1) return [{ pages, anchors: keep, cap: MAX_DEMOS }];
+  // Pages where a section starts: preferred cut points.
+  const sectionStart = new Set(c.unit.sections.map((s) => s.page));
+  const cuts: number[] = [];
+  for (let j = 1; j < k; j++) {
+    const target = Math.round((pages.length * j) / k);
+    const near = [target, target + 1, target - 1].find((i) => i > (cuts.at(-1) ?? 0) && i < pages.length && sectionStart.has(pages[i]));
+    cuts.push(near ?? Math.max(target, (cuts.at(-1) ?? 0) + 1));
+  }
+  const bounds = [0, ...cuts, pages.length];
+  const parts: OutlinePart[] = [];
+  for (let j = 0; j < k; j++) {
+    const ps = pages.slice(bounds[j], bounds[j + 1]);
+    if (!ps.length) continue;
+    const set = new Set(ps);
+    parts.push({ pages: ps, anchors: keep.filter((a) => set.has(a.page)), cap: 0 });
+  }
+  // Share MAX_DEMOS by pages (largest remainder), at least 2 per part.
+  const total = parts.reduce((n, p) => n + p.pages.length, 0);
+  const raw = parts.map((p) => (MAX_DEMOS * p.pages.length) / total);
+  parts.forEach((p, i) => (p.cap = Math.max(2, Math.floor(raw[i]))));
+  let left = MAX_DEMOS - parts.reduce((n, p) => n + p.cap, 0);
+  for (const i of raw.map((r, i) => [r - Math.floor(r), i]).sort((a, b) => b[0] - a[0]).map(([, i]) => i)) {
+    if (left <= 0) break;
+    parts[i].cap++;
+    left--;
+  }
+  return parts;
+}
+
 /**
  * Stream the outline; every demo is normalised locally and handed to `onDemo` as soon as
- * it is complete (no repair calls: an unusable outline item is dropped). Returns them all.
+ * it is complete (no repair calls: an unusable outline item is dropped). Long units are
+ * outlined in parallel parts (see outlineParts) sharing one id/anchor registry. Returns them all.
  */
 export async function planOutline(book: BookConfig, unitId: string, opts: OutlineOpts = {}): Promise<{ demos: OutlineDemo[]; state: PlanState }> {
   const c = loadCtx(book, unitId);
   const t = tag(book.slug, unitId);
   const noun = unitNoun(book);
   const keep = c.unit.anchors.filter((a) => !SKIP_SECTION.test(a.section));
-  const pagesWithContent = new Set(keep.map((a) => a.page));
+  const parts = outlineParts(c, keep);
   const maxPx = book.source.kind === "text" ? 1100 : 1400;
-  const content: Anthropic.Beta.BetaContentBlockParam[] = [
-    { type: "text", text: `${book.title} — unit "${unitId}": ${c.unit.title}. The pages follow, in order.` },
-  ];
-  const images = await Promise.all(c.unit.pages.filter((p) => pagesWithContent.has(p.label)).map(async (p) => ({ p, img: await pageImage(c, p.label, maxPx) })));
-  for (const { p, img } of images) if (img) content.push({ type: "text", text: `Page ${p.label}:` }, pngBlock(img));
   const sections = c.unit.sections.filter((s) => !SKIP_SECTION.test(s.id)).map((s) => `${s.id} ${s.title} (p.${s.page})`).join("\n");
-  content.push({
-    type: "text",
-    text: `Sections:\n${sections}\n\nParagraph anchors in reading order (${textSourceNote(book).name}; the page images are authoritative):\n\n${keep.map((a) => anchorLine(a, c.text, 600)).join("\n")}\n\nOutline the demos for this ${noun}.`,
-  });
 
   const state: PlanState = { ids: new Set(), components: new Set(), anchors: new Set() };
   const demos: OutlineDemo[] = [];
   const catalog = opts.templates === false || templatesOff() ? [] : await loadTemplates();
   const templateIds = new Set(catalog.map((x) => x.id));
-  const consider = (raw: unknown) => {
-    const parsed = OutlineDemoZ.safeParse(raw);
-    if (!parsed.success || demos.length >= 7) return;
-    const o = parsed.data as OutlineDemo;
-    const errs = fixOutline(o, c, state, templateIds);
-    if (errs.length) return log(`outline ${t}: dropped ${o.id}: ${errs.join("; ")}`);
-    state.ids.add(o.id);
-    state.components.add(o.component);
-    for (const b of o.beats) state.anchors.add(b.anchor);
-    demos.push(o);
-    log(`outline ${t}: + ${o.id} (${o.beats.length} beats${o.template ? `, template ${o.template}` : ""})`);
-    opts.onDemo?.(o);
+  const system = outlineSystem(book, templateIds.size ? await catalogText() : "");
+  const { model } = roleModel("outline");
+  if (parts.length > 1) log(`outline ${t}: ${parts.length} parts (${parts.map((p) => `pp.${p.pages[0]}–${p.pages.at(-1)}, ≤${p.cap}`).join("; ")})`);
+
+  const outlinePart = async (part: OutlinePart, i: number) => {
+    let count = 0;
+    const consider = (raw: unknown) => {
+      const parsed = OutlineDemoZ.safeParse(raw);
+      if (!parsed.success || count >= part.cap || demos.length >= MAX_DEMOS) return;
+      const o = parsed.data as OutlineDemo;
+      const errs = fixOutline(o, c, state, templateIds);
+      if (errs.length) return log(`outline ${t}: dropped ${o.id}: ${errs.join("; ")}`);
+      state.ids.add(o.id);
+      state.components.add(o.component);
+      for (const b of o.beats) state.anchors.add(b.anchor);
+      demos.push(o);
+      count++;
+      log(`outline ${t}: + ${o.id} (${o.beats.length} beats${o.template ? `, template ${o.template}` : ""}${parts.length > 1 ? `, part ${i + 1}` : ""})`);
+      opts.onDemo?.(o);
+    };
+    const content: Anthropic.Beta.BetaContentBlockParam[] = [
+      { type: "text", text: `${book.title} — unit "${unitId}": ${c.unit.title}. The pages follow, in order.` },
+    ];
+    const images = await Promise.all(part.pages.map(async (label) => ({ label, img: await pageImage(c, label, maxPx) })));
+    for (const { label, img } of images) if (img) content.push({ type: "text", text: `Page ${label}:` }, pngBlock(img));
+    const scope =
+      parts.length > 1
+        ? `This is part ${i + 1} of ${parts.length} of the ${noun} (pages ${part.pages[0]}–${part.pages.at(-1)}); the other parts are outlined separately. Outline at most ${part.cap} demos, anchored only to the paragraphs listed here.`
+        : `Outline the demos for this ${noun}.`;
+    content.push({
+      type: "text",
+      text: `Sections of the whole ${noun}:\n${sections}\n\nParagraph anchors in reading order (${textSourceNote(book).name}; the page images are authoritative):\n\n${part.anchors.map((a) => anchorLine(a, c.text, 600)).join("\n")}\n\n${scope}`,
+    });
+    const scanner = new DemoScanner((json) => {
+      try {
+        consider(JSON.parse(json));
+      } catch (e) {
+        log(`outline ${t}: bad demo JSON (${(e as Error).message})`);
+      }
+    });
+    const { message } = await call({
+      model,
+      effort: opts.effort ?? planEffort(),
+      label: `plan:${t}${parts.length > 1 ? `:part${i + 1}` : ""}`,
+      system,
+      messages: [{ role: "user", content }],
+      maxTokens: 16000,
+      onText: (d) => scanner.push(d),
+    });
+    if (!count) {
+      try {
+        const whole = extractJson(textOf(message)) as { demos?: unknown[] };
+        for (const d of whole.demos ?? []) consider(d);
+      } catch {
+        /* no JSON */
+      }
+    }
   };
-  const scanner = new DemoScanner((json) => {
-    try {
-      consider(JSON.parse(json));
-    } catch (e) {
-      log(`outline ${t}: bad demo JSON (${(e as Error).message})`);
-    }
-  });
-  const { message } = await call({
-    model: MODELS.opus,
-    effort: opts.effort ?? planEffort(),
-    label: `plan:${t}`,
-    system: outlineSystem(book, templateIds.size ? await catalogText() : ""),
-    messages: [{ role: "user", content }],
-    maxTokens: 16000,
-    onText: (d) => scanner.push(d),
-  });
-  if (!demos.length) {
-    try {
-      const whole = extractJson(textOf(message)) as { demos?: unknown[] };
-      for (const d of whole.demos ?? []) consider(d);
-    } catch {
-      /* no JSON */
-    }
-  }
-  if (!demos.length) throw new Error(`outline ${t}: no usable demos`);
+
+  // Parts run in parallel; one failing part doesn't sink the others (its demos are just missing).
+  const failed: string[] = [];
+  await Promise.all(
+    parts.map((p, i) =>
+      outlinePart(p, i).catch((e: Error) => {
+        if (parts.length === 1) throw e;
+        failed.push(`part ${i + 1}: ${e.message}`);
+        emit({ type: "log", level: "warn", message: `outline ${t}: part ${i + 1} failed: ${e.message}` });
+      }),
+    ),
+  );
+  if (!demos.length) throw new Error(`outline ${t}: no usable demos${failed.length ? ` (${failed.join("; ")})` : ""}`);
   log(`outline ${t}: ${demos.length} demos`);
   return { demos, state };
 }

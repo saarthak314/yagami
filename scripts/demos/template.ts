@@ -7,11 +7,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { call, type Effort, MODELS, prewarm, textOf } from "../lib/claude";
+import { call, type Effort, prewarm, roleModel, textOf } from "../lib/claude";
 import type { BookConfig, DemoSpec } from "../../src/types";
 import { emit } from "../lib/report";
 import { anchorContext, type Ctx, extractJson, loadPlan, log, paths, pngBlock, tag, textSourceNote } from "./common";
 import { bookImages, buildEffort, loadConvo, saveConvo, saveSpec, type Convo } from "./build";
+import { DEMO_RULES } from "./rules";
 import { PlanAssembler, type OutlineDemo } from "./plan";
 
 /** Mirrors TemplateInfo in src/demo/templates/catalog.ts (loaded at runtime; absent → no templates). */
@@ -80,6 +81,9 @@ One \`\`\`json block containing a DemoSpec plus "template", "config" and "expect
   "expect": [{ "anchor": "<beat anchor>", "readout": "<readout id>", "value": <number>, "tol"?: <relative tolerance, 0 = exact> }]
 }
 
+Robustness (written for coded demos — for a config it means: every readout and expression stays finite at every control's min and max and in every preset, labels stay inside the stage and don't overlap, nothing depends on randomness without a seed):
+${DEMO_RULES}
+
 Rules
 - Keep the outline's ids, component name, beat anchors and readout ids.
 - Every param id an expression or field in the config uses must be a control or a preset param.
@@ -98,7 +102,7 @@ let warm: Promise<void> | null = null;
  * demo; template calls wait for it so parallel first calls read the cache instead of each writing it.
  */
 export function warmTemplates(book: BookConfig): Promise<void> {
-  warm ??= systemPrompt().then((system) => prewarm({ model: MODELS.sonnet, effort: buildEffort(), label: `template-warm:${book.slug}`, system }));
+  warm ??= systemPrompt().then((system) => prewarm({ model: roleModel("template").model, effort: buildEffort(), label: `template-warm:${book.slug}`, system }));
   return warm;
 }
 
@@ -113,7 +117,7 @@ function jsonOf(text: string): unknown {
 
 async function turn(book: BookConfig, effort: Effort, label: string, messages: Anthropic.Beta.BetaMessageParam[]) {
   try {
-    return await call({ model: MODELS.sonnet, effort, label, system: await systemPrompt(), messages, maxTokens: TEMPLATE_MAX_TOKENS });
+    return await call({ model: roleModel("template").model, effort, label, system: await systemPrompt(), messages, maxTokens: TEMPLATE_MAX_TOKENS });
   } catch (e) {
     if (/hit max_tokens/.test((e as Error).message)) return null;
     throw e;

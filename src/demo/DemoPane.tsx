@@ -259,7 +259,7 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
                 <dt>
                   <Inline md={r.label} />
                 </dt>
-                <dd data-readout={r.id}>{readouts[r.id] ?? "—"}</dd>
+                <ReadoutValue id={r.id} value={readouts[r.id]} />
               </div>
             ))}
           </dl>
@@ -388,5 +388,15 @@ export function StepNav({ step }: { step: NonNullable<Props["step"]> }) {
         <ChevronRight />
       </button>
     </div>
+  );
+}
+
+/** A readout value; non-finite numbers show "—" to the reader but stay visible to the checks (data-broken). */
+function ReadoutValue({ id, value }: { id: string; value: string | number | undefined }) {
+  const broken = typeof value === "number" && !Number.isFinite(value);
+  return (
+    <dd data-readout={id} data-broken={broken ? "1" : undefined}>
+      {value === undefined || broken ? "—" : value}
+    </dd>
   );
 }
