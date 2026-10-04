@@ -15,7 +15,7 @@ import { loadBook, unitJsonPath, unitOf } from "./books";
 import { onCost, pool } from "./lib/claude";
 import type { Emit, Stage } from "./lib/events";
 import { Limit } from "./lib/limit";
-import { emit, setEmit } from "./lib/report";
+import { emit, setEmit, withEmit } from "./lib/report";
 import { assembleUnit, assembleVariants, anchorUnit, renderUnit } from "./content/index";
 import { fileHash, hash, readCache, updateCache } from "./demos/cache";
 import { loadCtx, loadPlan, paths, setSpecSink } from "./demos/common";
@@ -71,10 +71,19 @@ const UNIT_PARALLEL = 3;
 const CONTENT_PARALLEL = 2;
 
 export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promise<RunResult> {
-  const restore = setEmit(emitFn);
+  // Events and costs are scoped to this run, so books running side by side in one process stay separate.
+  return withEmit(emitFn, () => runBookScoped(slug, opts, emitFn));
+}
+
+async function runBookScoped(slug: string, opts: RunOpts, emitFn: Emit): Promise<RunResult> {
+  const restore = setEmit(emitFn); // process-wide fallback for code outside the run's async context
   const t0 = Date.now();
   let cost = 0;
-  const off = onCost((c) => {
+  // Every API label carries the book slug ("build:<slug>/<unit>:<id>", "build-warm:<slug>"), so only
+  // this book's calls count towards its cost.
+  const mine = (label: string) => label.includes(`:${slug}/`) || label.endsWith(`:${slug}`) || label.includes(`:${slug}:`);
+  const off = onCost((c, label) => {
+    if (!mine(label)) return;
     cost += c;
     emit({ type: "cost", total: cost });
   });
