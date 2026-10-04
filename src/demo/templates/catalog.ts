@@ -17,6 +17,9 @@ import {
   validateSimHistogram,
   validateTableBars,
   validateVectorDiagram,
+  validateHeapAllocator,
+  validateAttentionHeads,
+  validateLayerStack,
 } from "./configs";
 
 export interface TemplateInfo {
@@ -56,6 +59,9 @@ export const TEMPLATES: TemplateInfo[] = [
   entry("sequence", "Sequence and series", validateSequence),
   entry("cell-grid", "Cells, bits and words", validateCellGrid),
   entry("data-structure", "Data structure operations", validateDataStructure),
+  entry("heap-allocator", "Heap allocator", validateHeapAllocator),
+  entry("attention-heads", "Attention heads", validateAttentionHeads),
+  entry("layer-stack", "Transformer layer stack", validateLayerStack),
 ];
 
 export function templateInfo(id: string | undefined): TemplateInfo | undefined {

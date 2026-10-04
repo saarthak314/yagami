@@ -14,11 +14,11 @@ import { chromium, type Browser, type Page } from "playwright";
 import { createServer, type ViteDevServer } from "vite";
 import { z } from "zod";
 import type Anthropic from "@anthropic-ai/sdk";
-import { callJson, MODELS, pool } from "../lib/claude";
+import { callJson, pool, roleModel } from "../lib/claude";
 import { Limit } from "../lib/limit";
 import { emit } from "../lib/report";
 import type { BookConfig, DemoSpec, Expectation } from "../../src/types";
-import { loadConvo, runConvo, saveSpec } from "./build";
+import { loadConvo, runConvo, saveSpec, toFixTurn } from "./build";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
 import { domainOf } from "./domains";
 import { staticAudit } from "./rules";
@@ -557,8 +557,7 @@ async function review(c: Ctx, demo: DemoSpec, shots: BeatShot[]): Promise<BeatRe
   });
   content.push({ type: "text", text: `Review every beat (${shots.map((s) => s.beat).join(", ")}). Reply as JSON.` });
   const { data } = await callJson(ReviewSchema, {
-    model: MODELS.sonnet,
-    effort: "medium",
+    ...roleModel("review"),
     label: `verify:${tag(c.book.slug, c.unit.unit)}:${demo.id}`,
     system: reviewSystem(c.book),
     messages: [{ role: "user", content }],
@@ -616,7 +615,7 @@ export async function verifyDemo(env: VerifyEnv, c: Ctx, demo: DemoSpec, rounds:
         log(`verify ${t} ${demo.id}: no build conversation to continue; skipping fixes`);
         break;
       }
-      convo.messages.push(feedback(results));
+      toFixTurn(convo, feedback(results).content as Anthropic.Beta.BetaContentBlockParam[]);
       await runConvo(convo, 3, "revising", round + 1);
     }
     if (best && best.passed > results.filter((r) => r.pass).length) {
@@ -669,8 +668,7 @@ export async function reviewSheet(c: Ctx, demo: DemoSpec, check: CheckResult): P
   if (check.sheet && fs.existsSync(check.sheet)) content.push({ type: "text", text: "Contact sheet (beats left to right, top to bottom):" }, pngBlock(fs.readFileSync(check.sheet)));
   content.push({ type: "text", text: "Review the demo. Reply as JSON." });
   const { data } = await callJson(SheetReviewSchema, {
-    model: MODELS.sonnet,
-    effort: "medium",
+    ...roleModel("review"),
     label: `verify:${tag(c.book.slug, c.unit.unit)}:${demo.id}`,
     system: sheetSystem(c.book),
     messages: [{ role: "user", content }],
@@ -697,7 +695,7 @@ function checkFeedback(notes: string[], check: CheckResult, from: "checks" | "re
   return { role: "user", content };
 }
 
-function toResults(check: CheckResult, pass: boolean, issues: string[]): BeatResult[] {
+export function toResults(check: CheckResult, pass: boolean, issues: string[]): BeatResult[] {
   return check.shots.map((s) => {
     const mine = issues.filter((i) => new RegExp(`\\bbeats? [\\d,]*\\b${s.beat}\\b`).test(i));
     return { beat: s.beat, anchor: s.anchor, ready: s.ready, errors: s.errors, readouts: s.readouts, changed: s.changed, shots: [s.shot, s.shot] as [string, string], pass: pass && s.ready && !s.errors.length, issues: pass ? [] : mine.length ? mine : issues };
@@ -728,6 +726,11 @@ function mismatchedExpectations(demo: DemoSpec, notes: string[]): Expectation[] 
 
 export interface CheckedOpts {
   rounds?: number;
+  /**
+   * Results already in hand for the demo as it stands (a race candidate that was installed after
+   * both candidates failed): round 0 uses them instead of checking and reviewing again.
+   */
+  initial?: { check: CheckResult; review?: { pass: boolean; issues: string[] } };
   /** false: skip the model review (deterministic checks only). */
   review?: boolean;
   /**
@@ -753,7 +756,8 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
   try {
     for (; ; round++) {
       emit({ type: "demo", unit, id: demo.id, phase: "verifying", round, beats: demo.beats.length });
-      const check = await checkDemo(env, c, demo, outDir);
+      const given = round === 0 ? opts.initial : undefined;
+      const check = given ? given.check : await checkDemo(env, c, demo, outDir);
       // Last round, and the only problems left are expected values: a wrong expectation must not
       // sink a demo that is otherwise fine. Drop those expectations and let the review decide.
       if (!check.ok && round >= rounds && check.notes.length && check.notes.every(isExpectNote)) {
@@ -780,7 +784,7 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
         }
         const convo = round < rounds ? loadConvo(slug, unit, demo.id) : null;
         if (!convo) break;
-        convo.messages.push(checkFeedback(check.notes, check, "checks"));
+        toFixTurn(convo, checkFeedback(check.notes, check, "checks").content as Anthropic.Beta.BetaContentBlockParam[]);
         await runConvo(convo, 3, "revising", round + 1);
         demo = convo.spec; // a fix turn may have corrected the spec's expectations
         continue;
@@ -789,7 +793,7 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
         results = toResults(check, true, []);
         break;
       }
-      const r = await reviewSheet(c, demo, check);
+      const r = given?.review ?? (await reviewSheet(c, demo, check));
       reviewed = true;
       log(`verify ${t} ${demo.id}: round ${round}: checks pass, review ${r.pass ? "pass" : `fail (${r.issues.length})`}`);
       results = toResults(check, r.pass, r.issues);
@@ -805,7 +809,7 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
       // One revision on the review's findings; the next round re-checks deterministically, and a
       // version that passes the checks after this revision is accepted without a second review.
       const before = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
-      convo.messages.push(checkFeedback(r.issues, check, "review"));
+      toFixTurn(convo, checkFeedback(r.issues, check, "review").content as Anthropic.Beta.BetaContentBlockParam[]);
       await runConvo(convo, 3, "revising", round + 1);
       demo = convo.spec;
       if (before !== null && fs.existsSync(file) && fs.readFileSync(file, "utf8") === before) break;

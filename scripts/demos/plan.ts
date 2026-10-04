@@ -9,10 +9,14 @@
 // demo only. Accepted demos are handed to `onDemo` immediately, so building
 // can start long before the plan is finished.
 
+import fs from "node:fs";
+import sharp from "sharp";
 import { z } from "zod";
 import type Anthropic from "@anthropic-ai/sdk";
 import { call, roleModel, textOf, type Effort } from "../lib/claude";
-import type { BookConfig, ControlSpec, DemoPlan, DemoSpec, Expectation, Params, ParamValue } from "../../src/types";
+import type { Anchor, BookConfig, ControlSpec, DemoPlan, DemoSpec, Expectation, Params, ParamValue, Unit, UnitText } from "../../src/types";
+import { pagePng, rawUnitPath, unitTextPath } from "../books";
+import type { RawUnit } from "../content/raw";
 import { anchorLine, type Ctx, extractJson, loadCtx, log, pageImage, paths, pngBlock, setSpecSink, tag, textSourceNote, writeJson } from "./common";
 import { outlineCatalog as catalogText, templates as loadTemplates } from "./template";
 import { domainOf } from "./domains";
@@ -326,7 +330,9 @@ export interface PlanOpts {
 
 /** Hash of everything the planner sees (for incremental runs). */
 export function planInputHash(book: BookConfig, unitId: string, h: (...p: string[]) => string): string {
-  const c = loadCtx(book, unitId);
+  // Same values whether built from the anchors step's raw file or the assembled unit
+  // (outlineCtx rounds exactly like assemble), so the key doesn't change with the source.
+  const c = outlineCtx(book, unitId);
   // Only what the planner reads: structure and text. Page-image details (sizes,
   // srcset variants) change when images are re-rendered and must not trigger a re-plan.
   const { title, sections, anchors } = c.unit;
@@ -469,9 +475,12 @@ export function planEffort(): Effort {
 
 
 // =============================================================================
-// Outline planning (default): a short Opus outline, then every demo's full spec
-// is written in parallel together with its code (see build.ts generateDemo).
+// Outline planning (default): a short outline, then every demo's full spec is
+// written in parallel together with its code (see build.ts generateDemo).
 // The legacy single-shot planner above stays available (YAGAMI_PLANNER=legacy).
+//
+// The outline needs only the anchors step's output (anchors + text layer), not the
+// assembled page images: run.ts can start it as soon as anchors exist.
 // =============================================================================
 
 /** One demo as outlined: enough to write its spec and code without the whole plan. */
@@ -487,15 +496,38 @@ export interface OutlineDemo {
   template?: string;
 }
 
-const OutlineDemoZ = z.object({
-  id: z.string(),
-  title: z.string(),
-  component: z.string(),
-  idea: z.string(),
-  readouts: z.array(z.object({ id: z.string(), label: z.string(), measures: z.string().optional().default("") })),
-  beats: z.array(z.object({ anchor: z.string(), focus: z.string().optional().default("") })),
-  template: z.string().optional(),
-});
+/**
+ * One outlined demo as the model writes it. Compact on the wire (fewer, shorter keys;
+ * readouts and beats as tuples): `{ id, t, tpl, idea, r: [[id, label, measures]], b: [[anchor, focus]] }`.
+ * The older verbose shape (title/component/readouts/beats objects) is still accepted.
+ */
+const OutlineWireZ = z
+  .object({
+    id: z.string(),
+    t: z.string().optional(),
+    title: z.string().optional(),
+    component: z.string().optional(),
+    idea: z.string().optional().default(""),
+    tpl: z.string().optional(),
+    template: z.string().optional(),
+    r: z.array(z.array(z.string())).optional(),
+    readouts: z.array(z.object({ id: z.string(), label: z.string().optional().default(""), measures: z.string().optional().default("") })).optional(),
+    b: z.array(z.array(z.string())).optional(),
+    beats: z.array(z.object({ anchor: z.string(), focus: z.string().optional().default("") })).optional(),
+  })
+  .transform((w): OutlineDemo => {
+    const title = (w.t ?? w.title ?? w.id).trim();
+    const tpl = (w.tpl ?? w.template)?.trim();
+    return {
+      id: w.id,
+      title,
+      component: w.component ?? "",
+      idea: w.idea,
+      readouts: w.r ? w.r.filter((x) => x[0]).map(([id, label, measures]) => ({ id, label: label ?? id, measures: measures ?? "" })) : (w.readouts ?? []),
+      beats: w.b ? w.b.filter((x) => x[0]).map(([anchor, focus]) => ({ anchor, focus: focus ?? "" })) : (w.beats ?? []),
+      ...(tpl && tpl !== "custom" ? { template: tpl } : {}),
+    };
+  });
 
 /** YAGAMI_TEMPLATES=off: every demo is generated as code (A/B benchmarks, debugging). */
 export function templatesOff(): boolean {
@@ -507,23 +539,132 @@ export function legacyPlanner(): boolean {
   return process.env.YAGAMI_PLANNER === "legacy";
 }
 
+// --- Context without the assembled unit ------------------------------------------
+
+function readRaw(book: BookConfig, unitId: string): RawUnit | null {
+  const f = rawUnitPath(book.slug, unitId);
+  return fs.existsSync(f) ? (JSON.parse(fs.readFileSync(f, "utf8")) as RawUnit) : null;
+}
+
+/**
+ * The unit as the outline/planner sees it, built from the anchors step's raw file
+ * (anchors + text) so it is available before page images are assembled. Anchor and
+ * section geometry is rounded exactly like assemble does, so it equals the assembled
+ * unit (and the plan-cache key is the same either way). Page images are not part of
+ * it (`src` is empty): use outline images (below), or loadCtx after assemble.
+ * Falls back to the assembled unit when the raw file is missing.
+ */
+export function outlineCtx(book: BookConfig, unitId: string): Ctx {
+  const raw = readRaw(book, unitId);
+  if (!raw) return loadCtx(book, unitId);
+  const byPage = new Map(raw.pages.map((p) => [p.pdfPage, p]));
+  const r4 = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 10000) / 10000;
+  const norm = (pdfPage: number, x: number, y: number) => {
+    const c = byPage.get(pdfPage)!.crop;
+    return { x: r4((x - c.left) / c.width), y: r4((y - c.top) / c.height) };
+  };
+  const anchors: Anchor[] = raw.anchors.map((a) => {
+    const tl = norm(a.pdfPage, a.box.l, a.box.t);
+    const br = norm(a.pdfPage, a.box.r, a.box.b);
+    return { id: a.id, section: a.section, page: byPage.get(a.pdfPage)!.label, y: tl.y, y1: br.y, x: tl.x, x1: br.x, column: a.column, kind: a.kind };
+  });
+  const unit: Unit = {
+    book: book.slug,
+    unit: unitId,
+    title: raw.title,
+    sections: raw.sections.map((s) => ({ id: s.id, title: s.title, page: byPage.get(s.pdfPage)!.label, y: norm(s.pdfPage, 0, s.top).y })),
+    pages: raw.pages.map((p) => ({ label: p.label, src: "", width: Math.round(p.crop.width / 2), height: Math.round(p.crop.height / 2) })),
+    anchors,
+  };
+  const tfile = unitTextPath(book.slug, unitId);
+  const text: UnitText = fs.existsSync(tfile) ? (JSON.parse(fs.readFileSync(tfile, "utf8")) as UnitText) : { book: book.slug, unit: unitId, text: {} };
+  return { book, unit, text };
+}
+
+// --- Outline images: figure/table crops (text PDFs) or whole pages (scans) ---------------
+
+/** Long side of a figure/table crop for text PDFs (cheap; the per-demo calls get full crops later). */
+const FIGURE_PX = 560;
+/** At most this many figure/table crops per outline part. */
+const MAX_FIGURES = 8;
+/** Long side of a whole page for scanned books (their OCR text is unreliable). */
+const SCAN_PX = 1400;
+
+/**
+ * Images for an outline part, from the 300 dpi renders (available right after the render
+ * step; original colours). Text PDFs: one small crop per figure/table anchor — the text
+ * layer carries the rest. Scans: every page, since OCR text is noisy.
+ */
+export async function outlineImages(book: BookConfig, unitId: string, pages: string[], anchors: Anchor[]): Promise<Anthropic.Beta.BetaContentBlockParam[]> {
+  const raw = readRaw(book, unitId);
+  if (!raw) return [];
+  const byLabel = new Map(raw.pages.map((p) => [p.label, p]));
+  const labelOf = new Map(raw.pages.map((p) => [p.pdfPage, p.label]));
+  const out: Anthropic.Beta.BetaContentBlockParam[] = [];
+  const load = async (pdfPage: number, region: { left: number; top: number; width: number; height: number } | null, max: number) => {
+    const file = pagePng(book.slug, pdfPage);
+    if (!fs.existsSync(file)) return null;
+    try {
+      let img = sharp(file);
+      if (region) {
+        const meta = await img.metadata();
+        const W = meta.width ?? 0;
+        const H = meta.height ?? 0;
+        const left = Math.max(0, Math.round(region.left));
+        const top = Math.max(0, Math.round(region.top));
+        const width = Math.min(W - left, Math.round(region.width));
+        const height = Math.min(H - top, Math.round(region.height));
+        if (width < 8 || height < 8) return null;
+        img = sharp(file).extract({ left, top, width, height });
+      }
+      return await img.resize({ width: max, height: max, fit: "inside", withoutEnlargement: true }).png().toBuffer();
+    } catch {
+      return null;
+    }
+  };
+  if (book.source.kind !== "text") {
+    for (const label of pages) {
+      const p = byLabel.get(label);
+      const buf = p && (await load(p.pdfPage, p.crop, SCAN_PX));
+      if (buf) out.push({ type: "text", text: `Page ${label}:` }, pngBlock(buf));
+    }
+    return out;
+  }
+  const want = new Set(anchors.filter((a) => a.kind === "figure" || a.kind === "table").map((a) => a.id));
+  const figs = raw.anchors.filter((a) => want.has(a.id)).slice(0, MAX_FIGURES);
+  const bufs = await Promise.all(
+    figs.map((a) => {
+      const pad = 24;
+      return load(a.pdfPage, { left: a.box.l - pad, top: a.box.t - pad, width: a.box.r - a.box.l + 2 * pad, height: a.box.b - a.box.t + 2 * pad }, FIGURE_PX);
+    }),
+  );
+  figs.forEach((a, i) => {
+    const buf = bufs[i];
+    if (buf) out.push({ type: "text", text: `[${a.id}] (${a.kind}, p.${labelOf.get(a.pdfPage) ?? a.pdfPage}):` }, pngBlock(buf));
+  });
+  return out;
+}
+
 function outlineSystem(book: BookConfig, catalog: string): string {
   const d = domainOf(book.domain);
   const noun = unitNoun(book);
-  const src = textSourceNote(book);
+  const scanned = book.source.kind !== "text";
+  const sees = scanned
+    ? `You get the ${noun} as page images (authoritative: the OCR text is noisy and its equations are garbage) and a list of paragraph anchors with id, page, kind and OCR text.`
+    : `You get the ${noun}'s paragraph anchors with id, page, kind and their text from the PDF's text layer (accurate, but maths is flattened to plain characters), plus small images of its figures and tables.`;
   return `You outline interactive demos that accompany a ${noun} of "${book.title}" (${d.subject}).
 
-The reader sees the original pages on the right and one demo on the left. As they scroll, the demo whose beat is anchored to the paragraph under their reading line becomes active. Each demo is one React canvas component with presets, controls and live numerical readouts; an engineer writes its full spec and code later from your outline, the anchored paragraphs and page crops.
+The reader sees the original pages and one demo beside them. As they scroll, the demo whose beat is anchored to the paragraph under their reading line becomes active. Each demo is one canvas component with presets, controls and live numerical readouts; its full spec and code are written later from your outline and the anchored paragraphs.
 
-You get the ${noun} as page images (authoritative for equations, figures and wording) and a list of paragraph anchors with id, page, kind and ${src.name}. ${src.caveat} Anchor ids are the only valid beat anchors.
+${sees} Anchor ids are the only valid beat anchors.
 
-Propose 3–7 demos that genuinely aid understanding — about one per distinct idea worth seeing; a unit of 5+ pages usually has 5–6. Good demos let the reader see and manipulate exactly what the text describes, with readouts that check an equation or a quoted number; together they cover the ${noun} from start to end where it has substance; each is simple enough for one component (~200–400 lines). Prefer one demo with several beats over several thin demos.
+Propose demos that genuinely aid understanding — about one per distinct idea worth seeing. Good demos let the reader see and manipulate exactly what the text describes, with readouts that check an equation or a quoted number; together they cover the text from start to end where it has substance. Prefer one demo with several beats over several thin demos.
 
 ${d.planner}
 
-Each demo has 2–6 beats in reading order; a beat anchors to one paragraph, equation, figure or table (never a heading); an anchor holds at most one beat across the whole ${noun}.
+Each demo has 2–6 beats in reading order; a beat anchors to one paragraph, equation, figure or table (never a heading); an anchor holds at most one beat.
 
-Complexity budget: each demo is ONE idea that fits a compact component (≈200 lines): one scene, at most ~4 controls and 4 readouts, presets that vary parameters of the same scene rather than switching between different scenes. If an idea needs several scenes, comparisons of many strategies or a big simulation, split it into separate demos or drop it.
+Complexity budget: each demo is ONE idea that fits a compact component (≈200 lines): one scene, at most ~4 controls and 4 readouts, presets that vary parameters of the same scene. If an idea needs several scenes or many strategies, split it or drop it.
 
 ${
     catalog
@@ -532,17 +673,9 @@ ${catalog}
 
 `
       : ""
-  }Keep the outline short — the detail comes later. Write in your own words. Reply with only this JSON (demos in reading order):
+  }Be terse: the detail comes later. Write in your own words. Reply with only this JSON (demos in reading order), no other text:
 
-{ "demos": [ {
-  "id": "kebab-case",
-  "title": "sentence case, ≤ 48 chars",
-  "component": "PascalCase, unique",
-  "idea": "≤ 40 words: what is drawn, what the reader manipulates, which figure it re-draws if any",
-  "readouts": [ { "id": "camelCase", "label": "short, may use $LaTeX$", "measures": "≤ 15 words" } ],
-  "beats": [ { "anchor": "<anchor id>", "focus": "≤ 20 words: what this beat shows, with the text's numbers" } ]${catalog ? `,
-  "template": "<template id> or custom"` : ""}
-} ] }`;
+{"demos":[{"id":"kebab-case","t":"sentence-case title, ≤ 48 chars"${catalog ? `,"tpl":"<template id> or custom"` : ""},"idea":"≤ 25 words: what is drawn and manipulated","r":[["readoutId","short label, may use $LaTeX$","what it measures, ≤ 8 words"]],"b":[["<anchor id>","≤ 12 words: what this beat shows, with the text's numbers"]]}]}`;
 }
 
 /** Normalise one outlined demo against the unit and the demos accepted so far. Returns problems (empty = ok). */
@@ -556,6 +689,7 @@ function fixOutline(o: OutlineDemo, c: Ctx, state: PlanState, templateIds: Set<s
   while (state.ids.has(o.id)) o.id = `${o.id}-2`;
   o.component = o.component.replace(/[^A-Za-z0-9]/g, "");
   if (!/^[A-Z][A-Za-z0-9]+$/.test(o.component)) o.component = o.id.replace(/(^|-)([a-z0-9])/g, (_, __, ch: string) => ch.toUpperCase());
+  if (!/^[A-Z]/.test(o.component)) o.component = `Demo${o.component}`;
   while (state.components.has(o.component)) o.component = `${o.component}2`;
   o.title = clip(o.title.trim(), 48);
   const seen = new Set<string>();
@@ -581,79 +715,165 @@ function fixOutline(o: OutlineDemo, c: Ctx, state: PlanState, templateIds: Set<s
   return errs;
 }
 
+/** Content words of a title/idea, for spotting the same demo proposed by two parts. */
+function words(s: string): Set<string> {
+  const stop = new Set(["the", "a", "an", "of", "and", "in", "on", "for", "to", "with", "vs", "by", "its", "how", "what"]);
+  return new Set(s.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter((w) => w.length > 2 && !stop.has(w)));
+}
+
+function overlap(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0;
+  let n = 0;
+  for (const w of a) if (b.has(w)) n++;
+  return n / Math.min(a.size, b.size);
+}
+
+/** True when `o` looks like a demo already accepted (same template or near-identical title + idea). */
+function duplicateOf(o: OutlineDemo, accepted: OutlineDemo[]): OutlineDemo | undefined {
+  const tw = words(o.title);
+  const iw = words(`${o.title} ${o.idea}`);
+  return accepted.find((x) => {
+    const titleSim = overlap(tw, words(x.title));
+    const ideaSim = overlap(iw, words(`${x.title} ${x.idea}`));
+    return titleSim >= 0.8 || (ideaSim >= 0.7 && (o.template ?? "custom") === (x.template ?? "custom"));
+  });
+}
+
 export interface OutlineOpts {
   effort?: Effort;
   /** false: never mark demos as templates (YAGAMI_TEMPLATES=off does the same). */
   templates?: boolean;
   /** Called for each outlined demo the moment it is accepted. */
   onDemo?: (o: OutlineDemo) => void;
+  /** A prebuilt context (default: outlineCtx — works right after the anchors step). */
+  ctx?: Ctx;
 }
 
-/** Units with more content pages than this are outlined in parallel parts (one call per part). */
-const OUTLINE_PART_PAGES = 5;
-/** At most this many parts (each part gets ≥ 2 of the unit's demos). */
+/** At most this many parts per unit, outlined in parallel. */
 const OUTLINE_MAX_PARTS = 3;
-/** Demos per unit. */
-const MAX_DEMOS = 7;
+/** A split is used only if its largest part holds at most this share of the text (else it saves no time). */
+const SPLIT_MAX_SHARE: Record<number, number> = { 2: 0.7, 3: 0.55 };
+/** …and every part holds at least this share (no part is a scrap). */
+const SPLIT_MIN_SHARE = 0.12;
+/** Units with less text than this stay one part (splitting adds a call's overhead for little gain). */
+const SPLIT_MIN_CHARS = 2500;
+
+/** Most demos for a unit, by length (splitting must not inflate the count). */
+function maxDemos(pages: number): number {
+  return pages <= 3 ? 5 : pages <= 6 ? 6 : 7;
+}
 
 interface OutlinePart {
   /** Page labels in this part, in order. */
   pages: string[];
   anchors: Ctx["unit"]["anchors"];
+  /** Section ids in this part, in order. */
+  sections: string[];
   /** Most demos this part may outline. */
   cap: number;
 }
 
+/** Best contiguous partition of `w` into `k` runs, minimising the largest run's sum. Returns run start indices. */
+function partition(w: number[], k: number, allowed: (i: number) => boolean): number[] | null {
+  const n = w.length;
+  if (k > n) return null;
+  const pre = [0];
+  for (const x of w) pre.push(pre.at(-1)! + x);
+  // best[j][i]: min over partitions of the first i items into j runs of the largest run; cut[j][i]: start of the last run.
+  const best = Array.from({ length: k + 1 }, () => new Array<number>(n + 1).fill(Infinity));
+  const cut = Array.from({ length: k + 1 }, () => new Array<number>(n + 1).fill(-1));
+  best[0][0] = 0;
+  for (let j = 1; j <= k; j++)
+    for (let i = j; i <= n; i++)
+      for (let s = j - 1; s < i; s++) {
+        if (s > 0 && !allowed(s)) continue;
+        const v = Math.max(best[j - 1][s], pre[i] - pre[s]);
+        if (v < best[j][i]) {
+          best[j][i] = v;
+          cut[j][i] = s;
+        }
+      }
+  if (!Number.isFinite(best[k][n])) return null;
+  const starts: number[] = [];
+  for (let j = k, i = n; j > 0; j--) {
+    const s = cut[j][i];
+    starts.unshift(s);
+    i = s;
+  }
+  return starts;
+}
+
 /**
- * Split a unit's content pages into contiguous parts of about OUTLINE_PART_PAGES pages,
- * cutting at section starts where possible, so long units are outlined in parallel and
- * outline time doesn't grow with length. Demo caps are shared out by page count.
+ * Split a unit into 2–3 contiguous parts so its outline is written in parallel (outline time
+ * is mostly output). Units with fewer than two sections, or little text, stay one part. Cuts
+ * go at section boundaries; when one section dominates, at paragraph boundaries instead (never
+ * right after a heading). A split is used only if it is balanced by text length. Demo caps are
+ * shared out by text length (≥ 1 per part) from a total that depends on the unit's length.
  */
 export function outlineParts(c: Ctx, keep: Ctx["unit"]["anchors"]): OutlinePart[] {
-  const pages = c.unit.pages.map((p) => p.label).filter((l) => keep.some((a) => a.page === l));
-  const k = Math.max(1, Math.min(OUTLINE_MAX_PARTS, Math.ceil(pages.length / OUTLINE_PART_PAGES)));
-  if (k === 1) return [{ pages, anchors: keep, cap: MAX_DEMOS }];
-  // Pages where a section starts: preferred cut points.
-  const sectionStart = new Set(c.unit.sections.map((s) => s.page));
-  const cuts: number[] = [];
-  for (let j = 1; j < k; j++) {
-    const target = Math.round((pages.length * j) / k);
-    const near = [target, target + 1, target - 1].find((i) => i > (cuts.at(-1) ?? 0) && i < pages.length && sectionStart.has(pages[i]));
-    cuts.push(near ?? Math.max(target, (cuts.at(-1) ?? 0) + 1));
+  const len = (a: Anchor) => (a.kind === "heading" ? 0 : (c.text.text[a.id] ?? "").length + 40);
+  const pagesOf = (as: Anchor[]) => [...new Set(as.map((a) => a.page))];
+  const sectionsOf = (as: Anchor[]) => [...new Set(as.map((a) => a.section))];
+  const cap = maxDemos(pagesOf(keep).length);
+  const whole = (): OutlinePart[] => [{ pages: pagesOf(keep), anchors: keep, sections: sectionsOf(keep), cap }];
+  const content = (a: Anchor) => a.kind !== "heading" && a.kind !== "other";
+  const total = keep.reduce((n, a) => n + len(a), 0);
+  const substantive = new Set(keep.filter(content).map((a) => a.section));
+  if (substantive.size < 2 || total < SPLIT_MIN_CHARS) return whole();
+
+  const sectionStart = (i: number) => i > 0 && keep[i].section !== keep[i - 1].section;
+  const paragraphCut = (i: number) => i > 0 && keep[i - 1].kind !== "heading";
+  const w = keep.map(len);
+  const ok = (starts: number[], k: number) => {
+    const bounds = [...starts, keep.length];
+    const sums = starts.map((s, j) => w.slice(s, bounds[j + 1]).reduce((n, x) => n + x, 0));
+    const runs = starts.map((s, j) => keep.slice(s, bounds[j + 1]));
+    return Math.max(...sums) <= SPLIT_MAX_SHARE[k] * total && Math.min(...sums) >= SPLIT_MIN_SHARE * total && runs.every((r) => r.some(content));
+  };
+  let starts: number[] | null = null;
+  for (const k of [3, 2].filter((k) => k <= OUTLINE_MAX_PARTS)) {
+    for (const allowed of [sectionStart, paragraphCut]) {
+      const s = partition(w, k, allowed);
+      if (s && ok(s, k)) {
+        starts = s;
+        break;
+      }
+    }
+    if (starts) break;
   }
-  const bounds = [0, ...cuts, pages.length];
-  const parts: OutlinePart[] = [];
-  for (let j = 0; j < k; j++) {
-    const ps = pages.slice(bounds[j], bounds[j + 1]);
-    if (!ps.length) continue;
-    const set = new Set(ps);
-    parts.push({ pages: ps, anchors: keep.filter((a) => set.has(a.page)), cap: 0 });
-  }
-  // Share MAX_DEMOS by pages (largest remainder), at least 2 per part.
-  const total = parts.reduce((n, p) => n + p.pages.length, 0);
-  const raw = parts.map((p) => (MAX_DEMOS * p.pages.length) / total);
-  parts.forEach((p, i) => (p.cap = Math.max(2, Math.floor(raw[i]))));
-  let left = MAX_DEMOS - parts.reduce((n, p) => n + p.cap, 0);
-  for (const i of raw.map((r, i) => [r - Math.floor(r), i]).sort((a, b) => b[0] - a[0]).map(([, i]) => i)) {
+  if (!starts) return whole();
+  const bounds = [...starts, keep.length];
+  const runs = starts.map((s, j) => keep.slice(s, bounds[j + 1]));
+  const out: OutlinePart[] = runs.map((anchors) => ({ pages: pagesOf(anchors), anchors, sections: sectionsOf(anchors), cap: 0 }));
+  // Share the cap by text length (largest remainder), at least 1 per part.
+  const sums = runs.map((r) => r.reduce((n, a) => n + len(a), 0));
+  const share = sums.map((x) => (cap * x) / total);
+  out.forEach((p, i) => (p.cap = Math.max(1, Math.floor(share[i]))));
+  let left = cap - out.reduce((n, p) => n + p.cap, 0);
+  for (const i of share.map((r, i) => [r - Math.floor(r), i]).sort((a, b) => b[0] - a[0]).map(([, i]) => i)) {
     if (left <= 0) break;
-    parts[i].cap++;
+    out[i].cap++;
     left--;
   }
-  return parts;
+  return out;
 }
 
 /**
  * Stream the outline; every demo is normalised locally and handed to `onDemo` as soon as
- * it is complete (no repair calls: an unusable outline item is dropped). Long units are
- * outlined in parallel parts (see outlineParts) sharing one id/anchor registry. Returns them all.
+ * it is complete (no repair calls: an unusable outline item is dropped). Units with two or
+ * more sections are outlined in parallel parts (see outlineParts) sharing one id/anchor
+ * registry; near-duplicate demos from different parts are dropped. Needs only the anchors
+ * step's output. Returns the demos in reading order.
  */
 export async function planOutline(book: BookConfig, unitId: string, opts: OutlineOpts = {}): Promise<{ demos: OutlineDemo[]; state: PlanState }> {
-  const c = loadCtx(book, unitId);
+  const c = opts.ctx ?? outlineCtx(book, unitId);
   const t = tag(book.slug, unitId);
   const noun = unitNoun(book);
   const keep = c.unit.anchors.filter((a) => !SKIP_SECTION.test(a.section));
   const parts = outlineParts(c, keep);
-  const maxPx = book.source.kind === "text" ? 1100 : 1400;
+  const totalCap = parts.reduce((n, p) => n + p.cap, 0);
+  const sectionTitle = new Map(c.unit.sections.map((s) => [s.id, s.title]));
+  const sectionList = (ids: string[]) => ids.map((id) => `${id} ${sectionTitle.get(id) ?? ""}`.trim()).join("; ");
   const sections = c.unit.sections.filter((s) => !SKIP_SECTION.test(s.id)).map((s) => `${s.id} ${s.title} (p.${s.page})`).join("\n");
 
   const state: PlanState = { ids: new Set(), components: new Set(), anchors: new Set() };
@@ -662,16 +882,20 @@ export async function planOutline(book: BookConfig, unitId: string, opts: Outlin
   const templateIds = new Set(catalog.map((x) => x.id));
   const system = outlineSystem(book, templateIds.size ? await catalogText() : "");
   const { model } = roleModel("outline");
-  if (parts.length > 1) log(`outline ${t}: ${parts.length} parts (${parts.map((p) => `pp.${p.pages[0]}–${p.pages.at(-1)}, ≤${p.cap}`).join("; ")})`);
+  if (parts.length > 1) log(`outline ${t}: ${parts.length} parts (${parts.map((p) => `${p.sections[0]}…${p.sections.at(-1)}, ≤${p.cap}`).join("; ")})`);
 
   const outlinePart = async (part: OutlinePart, i: number) => {
     let count = 0;
     const consider = (raw: unknown) => {
-      const parsed = OutlineDemoZ.safeParse(raw);
-      if (!parsed.success || count >= part.cap || demos.length >= MAX_DEMOS) return;
-      const o = parsed.data as OutlineDemo;
+      const parsed = OutlineWireZ.safeParse(raw);
+      if (!parsed.success || count >= part.cap || demos.length >= totalCap) return;
+      const o = parsed.data;
       const errs = fixOutline(o, c, state, templateIds);
       if (errs.length) return log(`outline ${t}: dropped ${o.id}: ${errs.join("; ")}`);
+      if (parts.length > 1) {
+        const dup = duplicateOf(o, demos);
+        if (dup) return log(`outline ${t}: dropped ${o.id}: same idea as ${dup.id}`);
+      }
       state.ids.add(o.id);
       state.components.add(o.component);
       for (const b of o.beats) state.anchors.add(b.anchor);
@@ -680,18 +904,16 @@ export async function planOutline(book: BookConfig, unitId: string, opts: Outlin
       log(`outline ${t}: + ${o.id} (${o.beats.length} beats${o.template ? `, template ${o.template}` : ""}${parts.length > 1 ? `, part ${i + 1}` : ""})`);
       opts.onDemo?.(o);
     };
-    const content: Anthropic.Beta.BetaContentBlockParam[] = [
-      { type: "text", text: `${book.title} — unit "${unitId}": ${c.unit.title}. The pages follow, in order.` },
-    ];
-    const images = await Promise.all(part.pages.map(async (label) => ({ label, img: await pageImage(c, label, maxPx) })));
-    for (const { label, img } of images) if (img) content.push({ type: "text", text: `Page ${label}:` }, pngBlock(img));
+    const content: Anthropic.Beta.BetaContentBlockParam[] = [{ type: "text", text: `${book.title} — unit "${unitId}": ${c.unit.title}.` }];
+    content.push(...(await outlineImages(book, unitId, part.pages, part.anchors)));
+    const others = parts.filter((_, j) => j !== i).map((p) => sectionList(p.sections));
     const scope =
       parts.length > 1
-        ? `This is part ${i + 1} of ${parts.length} of the ${noun} (pages ${part.pages[0]}–${part.pages.at(-1)}); the other parts are outlined separately. Outline at most ${part.cap} demos, anchored only to the paragraphs listed here.`
-        : `Outline the demos for this ${noun}.`;
+        ? `This is part ${i + 1} of ${parts.length} (sections ${sectionList(part.sections)}); the other parts (${others.join(" | ")}) are outlined separately, in parallel — don't outline their ideas. Outline at most ${part.cap} demo${part.cap === 1 ? "" : "s"} (fewer is fine), anchored only to the paragraphs listed here.`
+        : `Outline at most ${totalCap} demos for this ${noun} (fewer is fine).`;
     content.push({
       type: "text",
-      text: `Sections of the whole ${noun}:\n${sections}\n\nParagraph anchors in reading order (${textSourceNote(book).name}; the page images are authoritative):\n\n${part.anchors.map((a) => anchorLine(a, c.text, 600)).join("\n")}\n\n${scope}`,
+      text: `Sections of the whole ${noun}:\n${sections}\n\nParagraph anchors in reading order (${textSourceNote(book).name}):\n\n${part.anchors.map((a) => anchorLine(a, c.text, 600)).join("\n")}\n\n${scope}`,
     });
     const scanner = new DemoScanner((json) => {
       try {
@@ -731,6 +953,8 @@ export async function planOutline(book: BookConfig, unitId: string, opts: Outlin
     ),
   );
   if (!demos.length) throw new Error(`outline ${t}: no usable demos${failed.length ? ` (${failed.join("; ")})` : ""}`);
+  const order = new Map(c.unit.anchors.map((a, i) => [a.id, i]));
+  demos.sort((a, b) => order.get(a.beats[0].anchor)! - order.get(b.beats[0].anchor)!);
   log(`outline ${t}: ${demos.length} demos`);
   return { demos, state };
 }
@@ -763,7 +987,7 @@ export class PlanAssembler {
     private readonly outline: { demos: OutlineDemo[] },
     out?: string,
   ) {
-    this.c = loadCtx(book, unitId);
+    this.c = outlineCtx(book, unitId);
     this.out = out ?? paths.plan(book.slug, unitId);
     // The real plan's assembler owns plan.json until finish(); scratch assemblers don't.
     if (!out) setSpecSink(book.slug, unitId, (spec) => this.accept(spec));

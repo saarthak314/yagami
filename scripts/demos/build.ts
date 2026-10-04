@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
-import { call, type Effort, pool, prewarm, roleModel, textOf } from "../lib/claude";
+import { AbortedError, call, type Effort, fixEffort, pool, prewarm, roleModel, systemCacheControl, textOf } from "../lib/claude";
 import type { Anchor, BookConfig, Domain, DemoSpec, Expectation } from "../../src/types";
 import { loadBook } from "../books";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, specSink, tag, textSourceNote, writeJson } from "./common";
@@ -60,9 +60,9 @@ export const BUILD_MAX_TOKENS = 8000;
 const TOO_LONG = "Your reply hit the length limit and was cut off. This demo is too big: write a simpler, more compact version of it (one scene, fewer modes and labels, shared helpers, ≤ ~200 lines), keeping the same ids and readout ids.";
 
 /** One builder turn with the output cap; `null` when the reply was cut off at the cap. */
-async function builderTurn(book: BookConfig, effort: Effort, label: string, messages: Anthropic.Beta.BetaMessageParam[]) {
+async function builderTurn(book: BookConfig, effort: Effort, label: string, messages: Anthropic.Beta.BetaMessageParam[], signal?: AbortSignal) {
   try {
-    return await call({ model: roleModel("build").model, effort, label, system: systemPrompt(book), messages, maxTokens: BUILD_MAX_TOKENS });
+    return await call({ model: roleModel("build").model, effort, label, system: systemPrompt(book), messages, maxTokens: BUILD_MAX_TOKENS, signal });
   } catch (e) {
     if (/hit max_tokens/.test((e as Error).message)) return null;
     throw e;
@@ -176,7 +176,8 @@ Then you write the full DemoSpec yourself and implement it in the same reply:
 - expect: readout values the text pins down unambiguously at a beat (a quoted number, or a formula from the text evaluated at that beat's numbers), as { "anchor", "readout", "value", "tol"? }. Omit anything the text doesn't determine. An empty list is fine.
 Reply with exactly two fenced blocks and nothing else: first \`\`\`json with the DemoSpec (including "expect"), then \`\`\`tsx with the complete file.`;
 
-  const blocks: Anthropic.Beta.BetaTextBlockParam[] = [{ type: "text", text, cache_control: { type: "ephemeral" } }];
+  // 1-hour TTL: runs within an hour share this ~30k-token prefix (see systemCacheControl).
+  const blocks: Anthropic.Beta.BetaTextBlockParam[] = [{ type: "text", text, cache_control: systemCacheControl() }];
   systemCache.set(book.domain, blocks);
   return blocks;
 }
@@ -270,6 +271,39 @@ export async function typecheck(slug: string, unit: string, file: string): Promi
 
 // --- Conversation loop ----------------------------------------------------------
 
+const FENCE = "```";
+
+/**
+ * Fix turns run at fix effort (low). Effort is part of the cached prefix, so switching it inside a
+ * conversation would re-bill the whole conversation uncached; instead a conversation that isn't
+ * at fix effort is replaced, in place, by a fresh one that carries what a fix needs — the spec,
+ * the file as it stands and the request — and reads the system prompt from the cache.
+ * Conversations already at fix effort (e.g. a low-effort race candidate) just continue.
+ */
+export function toFixTurn(convo: Convo, request: string | Anthropic.Beta.BetaContentBlockParam[]): void {
+  const effort = fixEffort();
+  const asBlocks = (r: string | Anthropic.Beta.BetaContentBlockParam[]): Anthropic.Beta.BetaContentBlockParam[] => (typeof r === "string" ? [{ type: "text", text: r }] : r);
+  if ((convo.effort ?? "medium") === effort) {
+    convo.messages.push({ role: "user", content: request });
+    return;
+  }
+  const file = paths.component(convo.book, convo.unit, convo.spec.component);
+  const current = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  convo.messages = [
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: `You wrote src/demos/${convo.book}/${convo.unit.replace(/~.*$/, "")}/${convo.spec.component}.tsx for this demo spec:\n\n${FENCE}json\n${JSON.stringify(convo.spec, null, 2)}\n${FENCE}\n\nThe file as it currently stands (its import paths are the correct ones):\n${FENCE}tsx\n${current}\n${FENCE}`,
+        },
+        ...asBlocks(request),
+      ],
+    },
+  ];
+  convo.effort = effort;
+}
+
 export function saveConvo(c: Convo) {
   writeJson(paths.convo(c.book, c.unit, c.spec.id), c);
 }
@@ -328,13 +362,26 @@ export function saveSpec(slug: string, unit: string, spec: DemoSpec) {
  * Send the conversation as it stands, write the returned code, then fix up
  * type/static errors for up to `rounds` extra turns. Returns true if clean.
  */
-export async function runConvo(convo: Convo, rounds = 4, phase: "building" | "revising" | "fixing" = "building", outerRound?: number): Promise<boolean> {
+export interface ConvoOpts {
+  /** Abort the conversation's model calls (a race lost). */
+  signal?: AbortSignal;
+  /** Don't emit progress events (race candidates; the race reports for them). */
+  quiet?: boolean;
+}
+
+export async function runConvo(
+  convo: Convo,
+  rounds = 4,
+  phase: "building" | "revising" | "fixing" = "building",
+  outerRound?: number,
+  opts: ConvoOpts = {},
+): Promise<boolean> {
   const { spec } = convo;
   const book = loadBook(convo.book);
   const t = tag(convo.book, convo.unit);
   const file = paths.component(convo.book, convo.unit, spec.component);
   const ev = (p: "building" | "revising" | "typecheck" | "fixing", detail?: string) =>
-    emit({ type: "demo", unit: convo.unit, id: spec.id, phase: p, round: outerRound, detail });
+    opts.quiet || emit({ type: "demo", unit: convo.unit, id: spec.id, phase: p, round: outerRound, detail });
   // A change to an existing file (fix or revise): let the model send only the edits.
   const editing = phase !== "building" || convo.messages.some((m) => m.role === "assistant");
   if (editing) hintEdits(convo);
@@ -343,7 +390,7 @@ export async function runConvo(convo: Convo, rounds = 4, phase: "building" | "re
     ev(round === 0 ? phase : "fixing", round === 0 ? undefined : `typecheck round ${round}`);
     // Plain text replies (```tsx block or edit blocks): no structured-output format, so every
     // turn shares the cached prefix with the first one.
-    const reply = await builderTurn(book, convo.effort ?? "medium", `build:${t}:${spec.id}`, convo.messages);
+    const reply = await builderTurn(book, convo.effort ?? "medium", `build:${t}:${spec.id}`, convo.messages, opts.signal);
     if (!reply) {
       log(`build ${t} ${spec.id}: reply hit the ${BUILD_MAX_TOKENS}-token cap (round ${round})`);
       if (simplified || round === rounds) break;
@@ -382,10 +429,7 @@ export async function runConvo(convo: Convo, rounds = 4, phase: "building" | "re
     }
     log(`build ${t} ${spec.id}: ${problems.length} problems (round ${round})`);
     if (round === rounds) break;
-    convo.messages.push({
-      role: "user",
-      content: `The file has these problems:\n${problems.map((p) => `- ${p}`).join("\n")}\n\nFix them. ${EDIT_HINT}`,
-    });
+    toFixTurn(convo, `The file has these problems:\n${problems.map((p) => `- ${p}`).join("\n")}\n\nFix them. ${EDIT_HINT}`);
   }
   saveConvo(convo);
   return false;
@@ -402,10 +446,16 @@ function hintEdits(convo: Convo) {
   last.content = blocks;
 }
 
-export async function buildDemo(c: Ctx, spec: DemoSpec): Promise<boolean> {
-  await warmBuilder(c.book, "medium");
-  const convo: Convo = { book: c.book.slug, unit: c.unit.unit, spec, messages: [firstMessage(c, spec, await bookImages(c, spec))] };
-  return runConvo(convo);
+export interface BuildOpts extends ConvoOpts {
+  /** Builder effort for the first reply (default buildEffort()). */
+  effort?: Effort;
+}
+
+export async function buildDemo(c: Ctx, spec: DemoSpec, opts: BuildOpts = {}): Promise<boolean> {
+  const effort = opts.effort ?? buildEffort();
+  await warmBuilder(c.book, effort);
+  const convo: Convo = { book: c.book.slug, unit: c.unit.unit, spec, effort, messages: [firstMessage(c, spec, await bookImages(c, spec))] };
+  return runConvo(convo, 4, "building", undefined, opts);
 }
 
 // --- Outline item → spec + code in one conversation ---------------------------------------
@@ -442,6 +492,8 @@ function outlineMessage(c: Ctx, o: OutlineDemo, others: OutlineDemo[], images: A
   };
 }
 
+export { AbortedError };
+
 export interface Generated {
   /** The accepted spec (written into plan.json), when one came out. */
   spec?: DemoSpec;
@@ -455,22 +507,31 @@ export interface Generated {
  * The spec goes through the planner's local fixes (one focused repair turn if needed) and
  * into plan.json; the code then goes through the usual static-check + typecheck loop.
  */
-export async function generateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, others: OutlineDemo[]): Promise<Generated> {
+export interface GenerateOpts extends BuildOpts {
+  /** false: validate the spec but don't put it into plan.json (a race candidate; the winner is accepted later). */
+  accept?: boolean;
+}
+
+export async function generateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, others: OutlineDemo[], gopts: GenerateOpts = {}): Promise<Generated> {
   const book = c.book;
   const t = tag(book.slug, c.unit.unit);
-  const ev = (phase: "building" | "typecheck" | "fixing", detail?: string) => emit({ type: "demo", unit: c.unit.unit, id: o.id, phase, detail });
+  const ev = (phase: "building" | "typecheck" | "fixing", detail?: string) => gopts.quiet || emit({ type: "demo", unit: c.unit.unit, id: o.id, phase, detail });
   ev("building");
   const images = await bookImages(c, { brief: `${o.idea} ${o.beats.map((b) => b.focus).join(" ")}`, beats: o.beats.map((b) => ({ anchor: b.anchor, preset: "", caption: "" })) });
   const messages: Anthropic.Beta.BetaMessageParam[] = [outlineMessage(c, o, others, images)];
-  const effort = buildEffort();
+  const effort = gopts.effort ?? buildEffort();
   await warmBuilder(book, effort);
   let simplified = false;
+  let turnEffort = effort;
   const ask = async (label: string): Promise<{ spec?: unknown; code?: string }> => {
-    const r = await builderTurn(book, effort, `${label}:${t}:${o.id}`, messages);
+    const r = await builderTurn(book, turnEffort, `${label}:${t}:${o.id}`, messages, gopts.signal);
     if (!r) {
-      // Too big: ask once for a smaller version instead of continuing a giant reply.
+      // Too big: ask once for a smaller version instead of continuing a giant reply. Measured: a capped
+      // medium-effort reply is usually all thinking, and the retry thinks the budget away again — so the
+      // simpler version is asked for at the (low) fix effort, whose builder prompt is already warm.
       if (simplified) return {};
       simplified = true;
+      turnEffort = fixEffort();
       log(`build ${t} ${o.id}: reply hit the ${BUILD_MAX_TOKENS}-token cap; asking for a simpler version`);
       messages.push({ role: "user", content: `${TOO_LONG} Reply again with both blocks (\`\`\`json spec, then \`\`\`tsx file).` });
       return ask(label);
@@ -501,7 +562,7 @@ export async function generateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, 
     }
   }
   const spec = checked.spec!;
-  plan.accept(spec);
+  if (gopts.accept !== false) plan.accept(spec);
 
   const file = paths.component(book.slug, c.unit.unit, spec.component);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -515,11 +576,8 @@ export async function generateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, 
     return { spec, ok: true };
   }
   log(`build ${t} ${spec.id}: ${problems.length} problems after the first reply`);
-  convo.messages.push({
-    role: "user",
-    content: `The file has these problems:\n${problems.map((p) => `- ${p}`).join("\n")}\n\nFix them. ${EDIT_HINT}`,
-  });
-  const ok = await runConvo(convo, 3, "fixing");
+  toFixTurn(convo, `The file has these problems:\n${problems.map((p) => `- ${p}`).join("\n")}\n\nFix them. ${EDIT_HINT}`);
+  const ok = await runConvo(convo, 3, "fixing", undefined, gopts);
   return { spec, ok, why: ok ? undefined : "build failed (typecheck)" };
 }
 
@@ -578,7 +636,7 @@ export async function reviseDemo(book: BookConfig, unitId: string, id: string, n
       if (fs.existsSync(shot)) content.push({ type: "text", text: `Beat ${i} (${spec.beats[i].preset}):` }, pngBlock(fs.readFileSync(shot)));
     });
   content.push({ type: "text", text: "Address every note, keep everything that already works, and reply with the complete corrected file as one ```tsx block." });
-  convo.messages.push({ role: "user", content });
+  toFixTurn(convo, content);
   log(`revise ${t} ${id}`);
   return runConvo(convo, 3, "revising");
 }

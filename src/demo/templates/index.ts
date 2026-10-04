@@ -20,6 +20,9 @@ const LOADERS: Record<string, Loader> = {
   sequence: () => import("./Sequence") as unknown as Promise<{ default: TemplateComponent }>,
   "cell-grid": () => import("./CellGrid") as unknown as Promise<{ default: TemplateComponent }>,
   "data-structure": () => import("./DataStructure") as unknown as Promise<{ default: TemplateComponent }>,
+  "heap-allocator": () => import("./HeapAllocator") as unknown as Promise<{ default: TemplateComponent }>,
+  "attention-heads": () => import("./AttentionHeads") as unknown as Promise<{ default: TemplateComponent }>,
+  "layer-stack": () => import("./LayerStack") as unknown as Promise<{ default: TemplateComponent }>,
 };
 
 const cache = new Map<string, TemplateComponent>();

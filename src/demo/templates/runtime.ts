@@ -1,7 +1,7 @@
 // Shared pieces for template components: parameter environments, defs, readouts, ticks.
 
 import type { DemoProps, Params } from "../../types";
-import { axes } from "../kit";
+import { axes, randn } from "../kit";
 import { compile, compileField, evalNum, num, type Compiled, type Env, type Value } from "./expr";
 import type { ReadoutDef } from "./configs";
 
@@ -227,4 +227,35 @@ export function stepIndex(t: number, count: number, perSecond: number, hold = 1.
   const cycle = (count - 1) / perSecond + hold;
   const s = ((t % cycle) + cycle) % cycle;
   return Math.min(count - 1, Math.floor(s * perSecond));
+}
+
+// ---------------------------------------------------------------------------
+// Seeded random draws for expressions (sim-histogram trials, heap-allocator workloads)
+// ---------------------------------------------------------------------------
+
+/** Inverse-CDF draw from a power law ∝ x^−a on [lo, hi]. */
+export function powerlawDraw(u: number, lo: number, hi: number, a: number): number {
+  const L = Math.max(1e-9, Math.min(lo, hi));
+  const H = Math.max(L * (1 + 1e-9), Math.max(lo, hi));
+  if (Math.abs(a - 1) < 1e-9) return L * Math.pow(H / L, u);
+  const e = 1 - a;
+  return Math.pow(Math.pow(L, e) + u * (Math.pow(H, e) - Math.pow(L, e)), 1 / e);
+}
+
+/** rand, randn, randint, coin, exprand, pareto, lognormal, powerlaw over one seeded generator. */
+export function randomFns(next: () => number): Env {
+  return {
+    rand: () => next(),
+    randn: () => randn(next),
+    randint: (a, b) => {
+      const lo = Math.ceil(Number(a));
+      const hi = Math.floor(Number(b));
+      return hi < lo ? lo : lo + Math.floor(next() * (hi - lo + 1));
+    },
+    coin: (p) => (next() < Number(p ?? 0.5) ? 1 : 0),
+    exprand: (rate) => -Math.log(1 - next()) / Math.max(1e-9, Number(rate)),
+    pareto: (a, xm) => Math.max(1e-9, Number(xm)) / Math.pow(1 - next(), 1 / Math.max(1e-6, Number(a))),
+    lognormal: (mu, sg) => Math.exp(Number(mu) + Number(sg) * randn(next)),
+    powerlaw: (lo, hi, a) => powerlawDraw(next(), Number(lo), Number(hi), Number(a)),
+  };
 }

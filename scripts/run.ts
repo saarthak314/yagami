@@ -20,8 +20,10 @@ import { assembleUnit, assembleVariants, anchorUnit, renderUnit } from "./conten
 import { fileHash, hash, readCache, updateCache } from "./demos/cache";
 import { loadCtx, loadPlan, paths, setSpecSink } from "./demos/common";
 import { buildDemo, buildEffort, generateDemo, loadConvo, reviseDemo, warmBuilder } from "./demos/build";
+import { cleanStaleCandidates, cleanupRaces, raceDemo, raceEnabled, raceIdle } from "./demos/race";
 import { legacyPlanner, type OutlineDemo, PlanAssembler, PLAN_KEY_PREFIX, planInputHash, planOutline, planUnit } from "./demos/plan";
 import { type CheckedOpts, closeEnv, type DemoResult, previousVerdict, startEnv, type VerifyEnv, verifyDemoChecked, writeReport } from "./demos/verify";
+import { fixEffort } from "./lib/claude";
 import { generateTemplateDemo, reviseTemplate, skipsReview, templateArtifact, warmTemplates } from "./demos/template";
 
 export type { Stage };
@@ -79,6 +81,7 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
   let env: Promise<VerifyEnv> | null = null;
   try {
     const book = loadBook(slug);
+    cleanStaleCandidates(slug); // drafts left by an interrupted race
     const units = opts.units?.length ? opts.units : book.units.map((u) => u.id);
     for (const u of units) unitOf(book, u);
     const steps = new Set(opts.steps?.length ? opts.steps : DEFAULT_STEPS);
@@ -99,7 +102,9 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
     // builder's prompt cache now, overlapping the content steps instead of waiting for them.
     const makesDemos = wantsDemos && (!!opts.force || !!opts.note || units.some((u) => !fs.existsSync(paths.plan(slug, u))));
     if (makesDemos && steps.has("verify")) void getEnv();
-    if (makesDemos && steps.has("plan") && steps.has("build") && !legacyPlanner()) void domainReady.then(() => warmBuilder(book, buildEffort()));
+    // Every effort the builder will run at: the race's drafts, and fix turns.
+    const builderEfforts = [...new Set([...(raceEnabled() ? ["low" as const, "medium" as const] : [buildEffort()]), fixEffort()])];
+    if (makesDemos && steps.has("plan") && steps.has("build") && !legacyPlanner()) void domainReady.then(() => Promise.all(builderEfforts.map((e) => warmBuilder(book, e))));
 
     // Sharper page variants render in the background once a unit's base pages are ready.
     const codeHash = contentCodeHash();
@@ -114,8 +119,18 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
       );
     };
 
-    /** Pages + anchors for one unit (skipped when unchanged). Returns whether the unit is usable. */
-    const content = async (unit: string): Promise<boolean> => {
+    /**
+     * Pages + anchors for one unit (skipped when unchanged). Opens two gates: `anchors` once the
+     * raw anchors, text and page renders exist (the outline can start: it works from those), and
+     * `pages` once the unit JSON + page images exist (demos can be generated and checked).
+     */
+    const content = async (unit: string, g: Gates): Promise<boolean> => {
+      const ok = await contentSteps(unit, g);
+      g.anchors.resolve(ok);
+      g.pages.resolve(ok);
+      return ok;
+    };
+    const contentSteps = async (unit: string, g: Gates): Promise<boolean> => {
       try {
         // Skip pages + anchors when nothing they depend on changed (PDF, book settings, content code).
         const u = unitOf(book, unit);
@@ -135,6 +150,7 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
           emit({ type: "stage", unit, stage, status: "start" });
           await fn(book, unit);
           emit({ type: "stage", unit, stage, status: "done" });
+          if (stage === "anchors") g.anchors.resolve(true);
         }
         if (["render", "anchors", "assemble"].every((s) => steps.has(s as Stage))) {
           updateCache(slug, unit, (c) => {
@@ -155,12 +171,17 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
     // readable early. Each unit's demos start as soon as its own pages are ready; up to
     // UNIT_PARALLEL units make demos side by side, sharing one global demo limit.
     const contentLimit = new Limit(CONTENT_PARALLEL);
-    const pagesReady = new Map(units.map((u, i) => [u, contentLimit.run(() => content(u), i)]));
+    const gates = new Map(units.map((u) => [u, { anchors: gate(), pages: gate() }]));
+    const pagesReady = new Map(units.map((u, i) => [u, contentLimit.run(() => content(u, gates.get(u)!), i)]));
+    // The outline only needs the anchors step's output (raw anchors, text, page renders), so it
+    // starts before the page images exist; the legacy planner needs the assembled unit.
+    const early = !legacyPlanner();
     await pool(units, UNIT_PARALLEL, async (unit, i) => {
-      if (!(await pagesReady.get(unit)) || !wantsDemos) return;
+      const g = gates.get(unit)!;
+      if (!(await (early ? g.anchors.promise : g.pages.promise)) || !wantsDemos) return;
       await domainReady;
       try {
-        const results = await runUnitDemos(book, unit, steps, opts, demoLimit, getEnv, i);
+        const results = await runUnitDemos(book, unit, steps, opts, demoLimit, getEnv, i, g.pages.promise);
         for (const r of results) if (!r.ok) failures.push(`${slug}/${unit} ${r.id}: ${r.why}`);
       } catch (e) {
         emit({ type: "stage", unit, stage: "plan", status: "error", detail: (e as Error).message });
@@ -175,9 +196,27 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
     return { failures, cost, seconds };
   } finally {
     off();
+    await raceIdle(); // losing drafts still aborting or mid-check use the browser
     if (env) await closeEnv(await env);
+    cleanupRaces(); // no check page is loading any more: candidate dirs can go
     setEmit(restore);
   }
+}
+
+interface Gate {
+  promise: Promise<boolean>;
+  resolve: (ok: boolean) => void;
+}
+interface Gates {
+  anchors: Gate;
+  pages: Gate;
+}
+
+/** A promise that can be resolved from outside (first resolution wins). */
+function gate(): Gate {
+  let resolve!: (ok: boolean) => void;
+  const promise = new Promise<boolean>((r) => (resolve = r));
+  return { promise, resolve };
 }
 
 interface DemoOutcome {
@@ -196,6 +235,8 @@ async function runUnitDemos(
   getEnv: () => Promise<VerifyEnv>,
   /** Lower runs first when demos wait for a slot (the unit's position in the book). */
   priority = 0,
+  /** The unit JSON + page images exist (the outline may start before; demo work waits for this). */
+  pages: Promise<boolean> = Promise.resolve(true),
 ): Promise<DemoOutcome[]> {
   const slug = book.slug;
   const tasks: Promise<DemoOutcome>[] = [];
@@ -213,7 +254,7 @@ async function runUnitDemos(
     emit({ type: "demo", unit, id: spec.id, phase: "queued", beats: spec.beats.length, title: spec.title });
     tasks.push(
       limit.run(async () => {
-        const out = await demoTask(book, unit, spec, steps, opts, getEnv);
+        const out = (await pages) ? await demoTask(book, unit, spec, steps, opts, getEnv) : { id: spec.id, ok: false, why: "the pages could not be made" };
         if (doBuild) emit({ type: "progress", unit, stage: "build", done: ++built, total, label: "demos" });
         if (doVerify) emit({ type: "progress", unit, stage: "verify", done: ++verified, total, label: "demos" });
         return out;
@@ -228,7 +269,7 @@ async function runUnitDemos(
     emit({ type: "demo", unit, id: o.id, phase: "queued", beats: o.beats.length, title: o.title });
     tasks.push(
       limit.run(async () => {
-        const out = await generatedTask(book, unit, o, plan, outlined, steps, opts, getEnv);
+        const out = (await pages) ? await generatedTask(book, unit, o, plan, outlined, steps, opts, getEnv) : { id: o.id, ok: false, why: "the pages could not be made" };
         if (doBuild) emit({ type: "progress", unit, stage: "build", done: ++built, total, label: "demos" });
         if (doVerify) emit({ type: "progress", unit, stage: "verify", done: ++verified, total, label: "demos" });
         return out;
@@ -320,6 +361,24 @@ async function demoTask(book: BookConfig, unit: string, spec: DemoSpec, steps: S
       const cached = readCache(slug, unit).demos[spec.id];
       const haveCode = fs.existsSync(file) && !!loadConvo(slug, unit, spec.id);
       const upToDate = haveCode && !opts.force && (cached?.spec === specHash || cached?.spec === undefined);
+      if (!upToDate && raceEnabled() && !opts.note) {
+        // Quick and careful drafts race; the first to pass the checks (+ review) is installed.
+        const race = await raceDemo(loadCtx(book, unit), { kind: "spec", spec }, getEnv, { verify: steps.has("verify"), review: true });
+        const final = race.spec ?? spec;
+        updateCache(slug, unit, (c) => void (c.demos[spec.id] = { spec: hash(JSON.stringify(final)), code: fileHash(file), verified: race.passed && steps.has("verify") }));
+        if (!race.built) {
+          emit({ type: "demo", unit, id: spec.id, phase: "fail", detail: race.why ?? "does not typecheck" });
+          return { id: spec.id, ok: false, why: race.why ?? "build failed (typecheck)" };
+        }
+        if (race.passed) {
+          if (!steps.has("verify")) emit({ type: "demo", unit, id: spec.id, phase: "pass", detail: "built (not verified)" });
+          return { id: spec.id, ok: true, result: race.result };
+        }
+        const result = await verifyDemoChecked(await getEnv(), loadCtx(book, unit), final, { rounds: opts.rounds ?? 2, initial: race.initial });
+        const after = currentSpec(slug, unit, final);
+        updateCache(slug, unit, (c) => void (c.demos[spec.id] = { spec: hash(JSON.stringify(after)), code: fileHash(file), verified: result.pass }));
+        return { id: spec.id, ok: result.pass, why: result.pass ? undefined : (result.beats.find((b) => !b.pass)?.issues[0] ?? "verify failed"), result };
+      }
       if (!upToDate) {
         const ok = await buildDemo(loadCtx(book, unit), spec);
         updateCache(slug, unit, (c) => void (c.demos[spec.id] = { spec: specHash, code: fileHash(file), verified: false }));
@@ -374,9 +433,12 @@ async function generatedTask(
   getEnv: () => Promise<VerifyEnv>,
 ): Promise<DemoOutcome> {
   const slug = book.slug;
+  // The real unit (pages + images exist now): crops for the model come from it. plan.c may be the
+  // outline's provisional context, built before the page images.
+  const c = loadCtx(book, unit);
   try {
     if (o.template) {
-      const tg = await generateTemplateDemo(plan.c, o, plan, outlined);
+      const tg = await generateTemplateDemo(c, o, plan, outlined);
       if (tg.spec) {
         updateCache(slug, unit, (c) => void (c.demos[tg.spec!.id] = { spec: hash(JSON.stringify(tg.spec)), code: artifactHash(slug, unit, tg.spec!), verified: false }));
         return verifyTemplate(book, unit, tg.spec, steps, opts, getEnv, (s) => plan.accept(s));
@@ -384,7 +446,29 @@ async function generatedTask(
       // No valid config: this demo is built as code after all.
       delete o.template;
     }
-    const g = await generateDemo(plan.c, o, plan, outlined);
+    if (raceEnabled()) {
+      const race = await raceDemo(c, { kind: "outline", o, plan, others: outlined }, getEnv, { verify: steps.has("verify"), review: true });
+      if (!race.spec) {
+        emit({ type: "demo", unit, id: o.id, phase: "fail", detail: race.why });
+        return { id: o.id, ok: false, why: race.why ?? "no usable spec" };
+      }
+      const spec = race.spec;
+      const file = paths.component(slug, unit, spec.component);
+      updateCache(slug, unit, (cc) => void (cc.demos[spec.id] = { spec: hash(JSON.stringify(spec)), code: fileHash(file), verified: race.passed && steps.has("verify") }));
+      if (!race.built) {
+        emit({ type: "demo", unit, id: spec.id, phase: "fail", detail: "does not typecheck" });
+        return { id: spec.id, ok: false, why: race.why ?? "build failed (typecheck)" };
+      }
+      if (race.passed) {
+        if (!steps.has("verify")) emit({ type: "demo", unit, id: spec.id, phase: "pass", detail: "built (not verified)" });
+        return { id: spec.id, ok: true, result: race.result };
+      }
+      const result = await verifyDemoChecked(await getEnv(), c, spec, { rounds: opts.rounds ?? 2, initial: race.initial });
+      const final = plan.specs().find((d) => d.id === spec.id) ?? spec;
+      updateCache(slug, unit, (cc) => void (cc.demos[spec.id] = { spec: hash(JSON.stringify(final)), code: fileHash(file), verified: result.pass }));
+      return { id: spec.id, ok: result.pass, why: result.pass ? undefined : (result.beats.find((b) => !b.pass)?.issues[0] ?? "verify failed"), result };
+    }
+    const g = await generateDemo(c, o, plan, outlined);
     if (!g.spec) {
       emit({ type: "demo", unit, id: o.id, phase: "fail", detail: g.why });
       return { id: o.id, ok: false, why: g.why ?? "no usable spec" };
@@ -400,7 +484,7 @@ async function generatedTask(
       emit({ type: "demo", unit, id: spec.id, phase: "pass", detail: "built (not verified)" });
       return { id: spec.id, ok: true };
     }
-    const result = await verifyDemoChecked(await getEnv(), plan.c, spec, { rounds: opts.rounds ?? 2 });
+    const result = await verifyDemoChecked(await getEnv(), c, spec, { rounds: opts.rounds ?? 2 });
     // Verification may have corrected the spec (expectations): cache the final one.
     const final = plan.specs().find((d) => d.id === spec.id) ?? spec;
     updateCache(slug, unit, (c) => void (c.demos[spec.id] = { spec: hash(JSON.stringify(final)), code: fileHash(file), verified: result.pass }));

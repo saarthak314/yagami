@@ -69,7 +69,7 @@ export interface SimHistogramConfig extends Common {
   trial: string;
   trials: Num;
   perSecond?: number;
-  bins?: { min: Num; max: Num; count?: number } | "integer";
+  bins?: { min: Num; max: Num; count?: number; log?: boolean } | "integer";
   expected?: string;
   xLabel?: string;
 }
@@ -329,17 +329,19 @@ export function validateMatrixOps(c: unknown, spec: DemoSpec): string[] {
 }
 
 const RANDOM_FNS = ["rand", "randn", "randint", "coin"];
+const RANDOM_FNS_ALL = [...RANDOM_FNS, "exprand", "pareto", "lognormal", "powerlaw"];
 export function validateSimHistogram(c: unknown, spec: DemoSpec): string[] {
   if (!isObj(c)) return ["config must be an object"];
-  const k = base(spec, ["t"], [...RANDOM_FNS, "frac"]);
+  const k = base(spec, ["t"], [...RANDOM_FNS_ALL, "frac"]);
   k.defs(c.defs);
   k.expr(c.trial, "trial");
   k.expr(c.trials, "trials");
   if (c.bins !== undefined && c.bins !== "integer") {
-    if (!isObj(c.bins)) k.add('bins: must be "integer" or { min, max, count? }');
+    if (!isObj(c.bins)) k.add('bins: must be "integer" or { min, max, count?, log? }');
     else {
       k.expr(c.bins.min, "bins.min");
       k.expr(c.bins.max, "bins.max");
+      if (c.bins.log && !(typeof c.bins.min !== "number" || c.bins.min > 0)) k.add("bins.min: must be > 0 with log bins");
     }
   }
   k.optExpr(c.expected, "expected", ["x"]);
@@ -755,6 +757,137 @@ export function validateDataStructure(c: unknown, spec: DemoSpec): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// heap-allocator, attention-heads, layer-stack
+// ---------------------------------------------------------------------------
+
+export const FIT_POLICIES = ["first", "next", "best"] as const;
+export type FitPolicy = (typeof FIT_POLICIES)[number];
+export type HeapRequest = { op: "malloc"; size: Num; id?: string } | { op: "free"; id: string };
+export interface HeapTraceGen {
+  /** Number of requests to generate. */
+  requests: Num;
+  seed?: number;
+  /** Size of each malloc: expression (rand(), randint(a,b), pareto(a, xmin), …). */
+  size: string;
+  /** Probability that a request frees a random live block instead (default 0.4). */
+  free?: Num;
+}
+export interface HeapAllocatorConfig extends Common {
+  heap?: Num;
+  max?: Num;
+  align?: Num;
+  header?: Num;
+  footer?: Num;
+  policy?: Num;
+  compare?: FitPolicy[];
+  list?: Num;
+  insert?: Num;
+  coalesce?: Num;
+  split?: Num;
+  trace: HeapRequest[] | HeapTraceGen;
+  chart?: "examined" | "utilization" | "heap";
+  speed?: Num;
+  code?: boolean;
+}
+
+export interface AttentionHeadsConfig extends Common {
+  seed?: number;
+  tokens: string[];
+  memory?: string[];
+  dModel?: Num;
+  heads?: Num;
+  causal?: Num;
+  scale?: Num;
+  temperature?: Num;
+  focus?: Num;
+  view?: "heatmaps" | "arcs";
+}
+
+export type Sublayer = "attention" | "cross" | "ffn";
+export interface LayerStackConfig extends Common {
+  seed?: number;
+  tokens: string[];
+  dModel?: Num;
+  dff?: Num;
+  layers?: Num;
+  sublayers?: Sublayer[];
+  heads?: Num;
+  residual?: Num;
+  norm?: Num;
+  embedScale?: Num;
+  posenc?: Num;
+  dropout?: Num;
+  focus?: Num;
+  speed?: Num;
+}
+
+export const SAMPLER_FNS = ["exprand", "pareto", "lognormal", "powerlaw"];
+export const HEAP_VARS = ["step", "steps", "done", "request", "requests", "examined", "last", "heap", "live", "peak", "util", "internal", "freeBlocks", "largestFree", "failed", "total_examined", "final_heap", "final_util", "final_peak", "total_failed"];
+const tokenList = (k: Checker, v: unknown, where: string, min = 2, max = 10) => {
+  if (!Array.isArray(v) || v.length < min || v.length > max || !v.every((x) => typeof x === "string")) k.add(`${where}: ${min}–${max} token strings are required`);
+};
+
+export function validateHeapAllocator(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, ["t"], [...RANDOM_FNS_ALL]);
+  k.defs(c.defs);
+  for (const f of ["heap", "max", "align", "header", "footer", "policy", "list", "insert", "coalesce", "split", "speed"]) k.optExpr(c[f], f);
+  if (c.compare !== undefined && !(Array.isArray(c.compare) && c.compare.length >= 1 && c.compare.length <= 3 && c.compare.every((p) => FIT_POLICIES.includes(p as FitPolicy))))
+    k.add(`compare: a list of 1–3 policies from ${FIT_POLICIES.join(", ")}`);
+  if (Array.isArray(c.trace)) {
+    if (!c.trace.length || c.trace.length > 40) k.add("trace: 1–40 requests are required");
+    const ids = new Set<string>();
+    c.trace.forEach((r, i) => {
+      if (!isObj(r)) return k.add(`trace[${i}]: must be { op: malloc, size, id? } or { op: free, id }`);
+      if (r.op === "malloc") {
+        k.expr(r.size, `trace[${i}].size`);
+        ids.add(typeof r.id === "string" ? r.id : String.fromCharCode(97 + (ids.size % 26)));
+      } else if (r.op === "free") {
+        if (typeof r.id !== "string" || !ids.has(r.id)) k.add(`trace[${i}].id: free must name an earlier malloc id (have: ${[...ids].join(", ") || "none"})`);
+      } else k.add(`trace[${i}].op: must be malloc or free`);
+    });
+  } else if (isObj(c.trace)) {
+    k.expr(c.trace.requests, "trace.requests");
+    k.expr(c.trace.size, "trace.size");
+    k.optExpr(c.trace.free, "trace.free");
+  } else k.add("trace: a list of requests or { requests, size, free?, seed? } is required");
+  if (c.chart !== undefined && !["examined", "utilization", "heap"].includes(c.chart as string)) k.add("chart: examined | utilization | heap");
+  const policies = Array.isArray(c.compare) ? (c.compare as string[]) : [];
+  const vars = [...HEAP_VARS, ...policies.flatMap((p) => HEAP_VARS.map((v) => `${v}_${p}`))];
+  k.readouts(c.readouts, spec, vars);
+  return k.problems;
+}
+
+export const ATTENTION_FNS = ["weight", "entropy", "maxw", "argmaxw", "rowsum"];
+export const ATTENTION_VARS = ["n", "m", "h", "dk", "dModel", "focus", "meanEntropy", "diversity", "rawVar", "scoreVar", "projOps", "scoreOps", "params", "t"];
+export function validateAttentionHeads(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, ATTENTION_VARS, ATTENTION_FNS);
+  k.defs(c.defs);
+  tokenList(k, c.tokens, "tokens");
+  if (c.memory !== undefined) tokenList(k, c.memory, "memory");
+  for (const f of ["dModel", "heads", "causal", "scale", "temperature", "focus"]) k.optExpr(c[f], f);
+  if (c.view !== undefined && !["heatmaps", "arcs"].includes(c.view as string)) k.add("view: heatmaps | arcs");
+  k.readouts(c.readouts, spec);
+  return k.problems;
+}
+
+export const LAYER_FNS = ["rmsAt"];
+export const LAYER_VARS = ["stage", "stages", "layer", "layers", "rms", "rmsFocus", "mean", "std", "rms_in", "rms_out", "growth", "params", "paramsTotal", "dff", "dk", "dModel", "n", "t"];
+const SUBLAYERS = ["attention", "cross", "ffn"];
+export function validateLayerStack(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, LAYER_VARS, LAYER_FNS);
+  k.defs(c.defs);
+  tokenList(k, c.tokens, "tokens");
+  for (const f of ["dModel", "dff", "layers", "heads", "residual", "norm", "embedScale", "posenc", "dropout", "focus", "speed"]) k.optExpr(c[f], f);
+  if (c.sublayers !== undefined && !(Array.isArray(c.sublayers) && c.sublayers.length >= 1 && c.sublayers.length <= 3 && c.sublayers.every((x) => SUBLAYERS.includes(x as string))))
+    k.add(`sublayers: 1–3 of ${SUBLAYERS.join(", ")}`);
+  k.readouts(c.readouts, spec);
+  return k.problems;
+}
+
+// ---------------------------------------------------------------------------
 // Docs (what the planner reads; keep them short and exact)
 // ---------------------------------------------------------------------------
 
@@ -819,8 +952,8 @@ export const DOCS = {
     },
   },
   "sim-histogram": {
-    when: "chance and statistics: repeated random trials (coins, dice, sums, random walks, sampling) building a histogram that approaches an expected distribution; law of large numbers.",
-    configDoc: `{ seed?, trial: "expr per trial" (random: rand() uniform 0–1, randn() normal, randint(a,b) inclusive, coin(p) 0/1; repeat(n, expr) sums n draws), trials: total, perSecond? (animation rate), bins?: "integer" | { min, max, count? } (integer when values are whole), expected?: "expr in x" (probability per integer x, or density for continuous bins) drawn as a line, xLabel?, readouts }. Variables: n (trials so far), mean, sd, last; frac(lo, hi) = share of results in [lo, hi] — these change while trials accumulate, so never use them in expect (expect only param-derived readouts like k*p). Expressions, defs, readouts: as in function-plot.`,
+    when: "chance and statistics: repeated random trials (coins, dice, sums, random walks, sampling, heavy-tailed sizes on log bins) building a histogram that approaches an expected distribution; law of large numbers.",
+    configDoc: `{ seed?, trial: "expr per trial" (random: rand() uniform 0–1, randn() normal, randint(a,b) inclusive, coin(p) 0/1, exprand(rate), pareto(alpha, xmin), lognormal(mu, sigma), powerlaw(lo, hi, alpha) ∝ x^−alpha; repeat(n, expr) sums n draws), trials: total, perSecond? (animation rate), bins?: "integer" | { min, max, count?, log? (log-spaced bins and axis for heavy tails) } (integer when values are whole), expected?: "expr in x" (probability per integer x, or density for continuous bins) drawn as a line, xLabel?, readouts }. Variables: n (trials so far), mean, sd, last; frac(lo, hi) = share of results in [lo, hi] — these change while trials accumulate, so never use them in expect (expect only param-derived readouts like k*p). Expressions, defs, readouts: as in function-plot.`,
     example: {
       seed: 3,
       trial: "repeat(k, coin(p))",
@@ -930,6 +1063,42 @@ export const DOCS = {
       kind: "bst",
       ops: [{ op: "insert", value: 50 }, { op: "insert", value: 30 }, { op: "insert", value: 70 }, { op: "insert", value: 20 }, { op: "insert", value: 40 }, { op: "search", value: 40 }],
       readouts: { height: "height", cmp: "comparisons" },
+    },
+  },
+  "heap-allocator": {
+    when: "malloc-style allocators: first/next/best fit (alone or side by side), implicit vs explicit free lists, LIFO vs address order, splitting, coalescing, header/alignment overhead, utilization over a request trace.",
+    configDoc: `{ defs?, heap? (bytes, 128), max? (8×heap), align? (8), header? (8), footer? (0), policy?: 'first'|'next'|'best' (expr; a select param), compare?: [policies] (1–3 heaps side by side, one step per request), list?: 'implicit'|'explicit', insert?: 'lifo'|'address', coalesce? (1), split? (1), trace: [{ op: malloc, size, id? } | { op: free, id }] (≤ 40; ids a, b, c… by default) | { requests, size: "expr" (rand, randint, pareto…), free? (0.4), seed? }, chart?: examined|utilization|heap, speed?, code? (true), readouts }. Variables (change as it plays): step, request, examined, last, heap, live, peak, util, internal, freeBlocks, largestFree, failed. Constants for expect: total_examined, final_heap, final_util, final_peak, total_failed. With compare each also has a policy suffix (total_examined_best). Expressions: as in function-plot.`,
+    example: {
+      heap: 96,
+      policy: "policy",
+      list: "list",
+      trace: [{ op: "malloc", size: 16, id: "a" }, { op: "malloc", size: 8, id: "b" }, { op: "malloc", size: 24, id: "c" }, { op: "free", id: "b" }, { op: "malloc", size: 4, id: "d" }],
+      readouts: { examined: "total_examined", util: { expr: "final_util", digits: 2 } },
+    },
+  },
+  "attention-heads": {
+    when: "multi-head or single-head attention over a few tokens: a heatmap or arcs per head, causal masking, cross-attention, 1/√dk scaling and temperature, heads vs per-head size and cost.",
+    configDoc: `{ seed?, tokens: string[] (2–10), memory?: string[] (cross-attention keys/values), dModel? (8, ≤ 64), heads? (2, 1–8; dk = floor(dModel/heads)), causal? (1/0), scale? (1/0 ÷√dk, 1), temperature? (1), focus? (query row, last), view?: heatmaps|arcs, defs?, readouts }. Variables: n, m, h, dk, dModel, focus, meanEntropy (focus row, mean over heads), diversity (0–1 spread between heads), rawVar (var of q·k ≈ dk), scoreVar, projOps = 4·n·dModel², scoreOps = h·n·m·dk, params = 4·dModel². Functions: weight(head, i, j), entropy(head, i), maxw(head, i), argmaxw(head, i), rowsum(head, i). Expressions: as in function-plot.`,
+    example: {
+      seed: 4,
+      tokens: ["the", "law", "will", "never", "be", "perfect"],
+      dModel: "d",
+      heads: "h",
+      causal: "masked",
+      readouts: { dk: "dk", ent: { expr: "meanEntropy", digits: 2 }, ops: "scoreOps" },
+    },
+  },
+  "layer-stack": {
+    when: "a transformer layer or a stack of N as a pipeline: embeddings (×√d) + positional encoding, attention / feed-forward sublayers, residuals, LayerNorm post/pre/none, dropout — stage by stage with the stream's RMS.",
+    configDoc: `{ seed?, tokens: string[] (2–10), dModel? (16), dff? (4·dModel), layers? (1, ≤ 8), sublayers?: [attention|cross|ffn] (default [attention, ffn]), heads? (2), residual? (1), norm?: 'post'|'pre'|'none', embedScale? (1), posenc? (1), dropout? (0), focus? (row, 0), speed? (stages/s, 1), defs?, readouts }. Variables (change as it plays): stage, stages, layer, layers, rms, rmsFocus, mean, std (focus row). Constants for expect: rms_in, rms_out, growth, params (per layer: 4d² + 2·d·dff + dff + d), paramsTotal, n, dModel, dff, dk. Function rmsAt(k). Expressions: as in function-plot.`,
+    example: {
+      seed: 2,
+      tokens: ["the", "cat", "sat", "on", "the", "mat"],
+      dModel: 16,
+      layers: "N",
+      residual: "res",
+      norm: "norm",
+      readouts: { rms: { expr: "rms", digits: 2 }, growth: { expr: "growth", digits: 2 }, params: "params" },
     },
   },
 } as const;

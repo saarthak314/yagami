@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { call, type Effort, prewarm, roleModel, textOf } from "../lib/claude";
+import { call, type Effort, fixEffort, prewarm, roleModel, systemCacheControl, textOf } from "../lib/claude";
 import type { BookConfig, DemoSpec } from "../../src/types";
 import { emit } from "../lib/report";
 import { anchorContext, type Ctx, extractJson, loadPlan, log, paths, pngBlock, tag, textSourceNote } from "./common";
@@ -90,20 +90,33 @@ Rules
 - "expect": add an entry wherever the text pins down a readout's value at a beat (a quoted number, a worked example, an equation evaluated at the beat's params). Only values that follow unambiguously from the text and the beat's params; omit the list otherwise. Readouts are rendered with \`fmt\` (3 decimals) unless the config formats them.
 - Captions: no exclamation marks, never mention AI, never copy sentences from the text.
 - Reply with only the \`\`\`json block.`;
-    return [{ type: "text" as const, text, cache_control: { type: "ephemeral" as const } }];
+    // 1-hour TTL: runs within an hour share this prefix (see systemCacheControl).
+    return [{ type: "text" as const, text, cache_control: systemCacheControl() }];
   })();
   return systemText;
 }
 
-let warm: Promise<void> | null = null;
+const warm = new Map<string, Promise<void>>();
 
 /**
- * Write the template prompt to the cache once, as soon as the outline marks the first template
- * demo; template calls wait for it so parallel first calls read the cache instead of each writing it.
+ * Write the template prompt to the cache once per effort (cache entries are per model + effort),
+ * as soon as the outline marks the first template demo; template calls wait for it so parallel
+ * first calls read the cache instead of each writing it.
  */
-export function warmTemplates(book: BookConfig): Promise<void> {
-  warm ??= systemPrompt().then((system) => prewarm({ model: roleModel("template").model, effort: buildEffort(), label: `template-warm:${book.slug}`, system }));
-  return warm;
+export function warmTemplates(book: BookConfig, effort: Effort = templateEffort()): Promise<void> {
+  const { model } = roleModel("template");
+  const key = `${model}:${effort}`;
+  let p = warm.get(key);
+  if (!p) {
+    p = systemPrompt().then((system) => prewarm({ model, effort, label: `template-warm:${book.slug}`, system }));
+    warm.set(key, p);
+  }
+  return p;
+}
+
+/** Effort for writing a template spec + config (the template group's, else the builder's). */
+function templateEffort(): Effort {
+  return roleModel("template").effort ?? buildEffort();
 }
 
 function jsonOf(text: string): unknown {
@@ -172,7 +185,7 @@ export interface TemplateGenerated {
   why?: string;
 }
 
-/** Outline item → spec + template config (one Sonnet conversation, one repair turn at most). */
+/** Outline item → spec + template config (one Sonnet conversation, up to two repair turns). */
 export async function generateTemplateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, others: OutlineDemo[]): Promise<TemplateGenerated> {
   const book = c.book;
   const t = tag(book.slug, c.unit.unit);
@@ -180,17 +193,18 @@ export async function generateTemplateDemo(c: Ctx, o: OutlineDemo, plan: PlanAss
   emit({ type: "demo", unit: c.unit.unit, id: o.id, phase: "building", detail: `configuring the ${templateId} template` });
   const images = await bookImages(c, { brief: `${o.idea} ${o.beats.map((b) => b.focus).join(" ")}`, beats: o.beats.map((b) => ({ anchor: b.anchor, preset: "", caption: "" })) });
   const messages: Anthropic.Beta.BetaMessageParam[] = [firstMessage(c, o, others, images)];
-  const effort = buildEffort();
-  await warmTemplates(book);
+  const effort = templateEffort();
+  await warmTemplates(book, effort);
   let result: { spec?: DemoSpec; errors: string[] } = { errors: [] };
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Two repair turns: falling back to code is far slower and costlier than another short config turn.
+  for (let attempt = 0; attempt < 3; attempt++) {
     const r = await turn(book, effort, `template:${t}:${o.id}`, messages);
     if (!r) return { ok: false, fallback: true, why: "the template config reply was cut off" };
     messages.push({ role: "assistant", content: r.message.content });
     result = await checkReply(jsonOf(textOf(r.message)), o, templateId, plan);
     if (!result.errors.length) break;
     log(`template ${t} ${o.id}: ${result.errors.length} problem(s): ${result.errors.slice(0, 2).join("; ")}`);
-    if (attempt === 0)
+    if (attempt < 2)
       messages.push({ role: "user", content: `The spec/config needs corrections:\n${result.errors.map((e) => `- ${e}`).join("\n")}\n\nReply with the complete corrected JSON in one \`\`\`json block (same ids).` });
   }
   if (result.errors.length || !result.spec) {
@@ -238,8 +252,13 @@ export async function reviseTemplate(
   const unit = c.unit.unit;
   const t = tag(slug, unit);
   emit({ type: "demo", unit, id: spec.id, phase: "revising", round: opts.round, detail: "adjusting the template config" });
-  const effort = buildEffort();
-  const convo: Convo = loadConvo(slug, unit, spec.id) ?? { book: slug, unit, spec, messages: [], effort, kind: "template" };
+  // Config fixes run at fix effort (low). Effort is part of the cached prefix: a saved conversation
+  // at another effort is not continued (that would re-bill it uncached) but restarted from the
+  // current spec, reading the system prompt from the cache.
+  const effort = fixEffort();
+  void warmTemplates(c.book, effort);
+  const saved = loadConvo(slug, unit, spec.id);
+  const convo: Convo = saved && (saved.effort ?? "medium") === effort ? saved : { book: slug, unit, spec, messages: [], effort, kind: "template" };
   if (!convo.messages.length) {
     convo.messages.push({ role: "user", content: `This demo of "${c.book.title}" uses the template "${spec.template}". Its current spec and config:\n\`\`\`json\n${JSON.stringify(spec, null, 2)}\n\`\`\`` });
     convo.messages.push({ role: "assistant", content: "Understood." });
@@ -256,7 +275,7 @@ export async function reviseTemplate(
   const assembler = new PlanAssembler(c.book, unit, { demos: [...others.map(asOutline), asOutline(spec)] }, path.join(paths.verifyDir(slug, unit), ".scratch-plan.json"));
   let out: DemoSpec | null = null;
   for (let attempt = 0; attempt < 2 && !out; attempt++) {
-    const r = await turn(c.book, convo.effort ?? effort, `revise:${t}:${spec.id}`, convo.messages);
+    const r = await turn(c.book, effort, `revise:${t}:${spec.id}`, convo.messages);
     if (!r) break;
     convo.messages.push({ role: "assistant", content: r.message.content });
     const res = await checkReply(jsonOf(textOf(r.message)), asOutline(spec), spec.template!, assembler);

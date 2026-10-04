@@ -2,10 +2,10 @@
 // approaches the expected distribution.
 
 import { useMemo } from "react";
-import { Stage, axes, draw, randn, rng, theme, useSim } from "../kit";
+import { Stage, axes, draw, rng, theme, useSim } from "../kit";
 import { compile, type Env } from "./expr";
 import type { SimHistogramConfig } from "./configs";
-import { applyDefs, compileDefs, compileReadouts, fmtTick, niceTicks, opt, paramEnv, readoutValues, val, type TemplateProps } from "./runtime";
+import { applyDefs, compileDefs, compileReadouts, fmtTick, logTicks, niceTicks, opt, paramEnv, randomFns, readoutValues, val, type TemplateProps } from "./runtime";
 
 const HOLD = 2; // seconds the full histogram stays up before the run repeats
 const MAX_TRIALS = 20000;
@@ -16,7 +16,7 @@ export default function SimHistogram({ config, params, preset, playing, resetKey
       defs: compileDefs(config.defs),
       trial: compile(config.trial),
       trials: opt(config.trials)!,
-      bins: config.bins && config.bins !== "integer" ? { min: opt(config.bins.min)!, max: opt(config.bins.max)!, count: config.bins.count } : config.bins,
+      bins: config.bins && config.bins !== "integer" ? { min: opt(config.bins.min)!, max: opt(config.bins.max)!, count: config.bins.count, log: !!config.bins.log } : config.bins,
       expected: config.expected ? compile(config.expected) : undefined,
       readouts: compileReadouts(config.readouts),
     }),
@@ -28,16 +28,7 @@ export default function SimHistogram({ config, params, preset, playing, resetKey
   const run = useMemo(() => {
     const env: Env = applyDefs(paramEnv(params), c.defs);
     const next = rng(config.seed ?? 1);
-    const fns: Env = {
-      rand: () => next(),
-      randn: () => randn(next),
-      randint: (a, b) => {
-        const lo = Math.ceil(Number(a));
-        const hi = Math.floor(Number(b));
-        return lo + Math.floor(next() * (hi - lo + 1));
-      },
-      coin: (p) => (next() < Number(p ?? 0.5) ? 1 : 0),
-    };
+    const fns = randomFns(next);
     const total = Math.max(1, Math.min(MAX_TRIALS, Math.round(val(c.trials, env))));
     const tEnv = { ...env, ...fns };
     const results = Array.from({ length: total }, () => val(c.trial, tEnv));
@@ -46,6 +37,7 @@ export default function SimHistogram({ config, params, preset, playing, resetKey
     let lo: number;
     let hi: number;
     let count: number;
+    const log = !integer && !!c.bins && c.bins !== "integer" && c.bins.log;
     if (integer) {
       lo = Math.min(...finite);
       hi = Math.max(...finite);
@@ -59,9 +51,10 @@ export default function SimHistogram({ config, params, preset, playing, resetKey
       hi = Math.max(...finite);
       count = 24;
     }
-    if (!(hi > lo)) hi = lo + 1;
+    if (log) lo = Math.max(1e-9, lo);
+    if (!(hi > lo)) hi = log ? lo * 10 : lo + 1;
     count = Math.max(1, Math.min(60, count));
-    return { env, results, integer, lo, hi, count, total };
+    return { env, results, integer, lo, hi, count, total, log };
   }, [c, paramsKey, config.seed]); // params enter through paramsKey
 
   const perSecond = config.perSecond ?? Math.max(20, run.total / 5);
@@ -87,16 +80,24 @@ export default function SimHistogram({ config, params, preset, playing, resetKey
         const sample = run.results.slice(0, n).filter(Number.isFinite);
 
         // Histogram (share of trials per bin).
-        const { lo, hi, count, integer } = run;
+        const { lo, hi, count, integer, log } = run;
         const width1 = integer ? 1 : (hi - lo) / count;
+        // Log bins: equal widths in log x (edges lo·(hi/lo)^(b/count)).
+        const span = Math.log(hi / lo);
+        const edge = (b: number) => (log ? lo * Math.exp((span * b) / count) : lo + b * width1);
         const counts = new Array<number>(count).fill(0);
         for (const v of sample) {
-          const b = integer ? Math.round(v) - lo : Math.min(count - 1, Math.floor((v - lo) / width1));
+          const b = integer ? Math.round(v) - lo : log ? (v > 0 ? Math.floor((Math.log(v / lo) / span) * count) : -1) : Math.min(count - 1, Math.floor((v - lo) / width1));
           if (b >= 0 && b < count) counts[b]++;
+          else if (log && b === count && v <= hi) counts[count - 1]++;
         }
         const shares = counts.map((k) => k / Math.max(1, sample.length));
         const expected = c.expected
           ? counts.map((_, b) => {
+              if (log) {
+                const x = Math.sqrt(edge(b) * edge(b + 1));
+                return val(c.expected!, { ...run.env, x }) * (edge(b + 1) - edge(b));
+              }
               const x = integer ? lo + b : lo + (b + 0.5) * width1;
               const p = val(c.expected!, { ...run.env, x });
               return integer ? p : p * width1;
@@ -106,24 +107,32 @@ export default function SimHistogram({ config, params, preset, playing, resetKey
 
         const yTicks = niceTicks(0, top, Math.max(2, Math.floor((height - 90) / 46)));
         const box = { left: 52, top: 26, width: width - 52 - 30, height: height - 26 - 46 };
-        const xAt = (v: number) => box.left + ((v - (integer ? lo - 0.5 : lo)) / ((integer ? hi + 0.5 : hi) - (integer ? lo - 0.5 : lo))) * box.width;
-        const xTickVals = integer ? niceTicks(lo, hi, Math.max(2, Math.floor(box.width / 46))).filter((v) => Number.isInteger(v)) : niceTicks(lo, hi, Math.max(2, Math.floor(box.width / 70)));
+        const xAt = log
+          ? (v: number) => box.left + (Math.log(Math.max(lo, v) / lo) / span) * box.width
+          : (v: number) => box.left + ((v - (integer ? lo - 0.5 : lo)) / ((integer ? hi + 0.5 : hi) - (integer ? lo - 0.5 : lo))) * box.width;
+        const xTickVals = log ? logTicks(lo, hi) : integer ? niceTicks(lo, hi, Math.max(2, Math.floor(box.width / 46))).filter((v) => Number.isInteger(v)) : niceTicks(lo, hi, Math.max(2, Math.floor(box.width / 70)));
         const ax = axes(ctx, box, {
-          xDomain: [integer ? lo - 0.5 : lo, integer ? hi + 0.5 : hi],
+          xDomain: log ? [0, 1] : [integer ? lo - 0.5 : lo, integer ? hi + 0.5 : hi],
           yDomain: [0, top],
           yTicks,
-          xTicks: xTickVals,
+          xTicks: log ? [] : xTickVals,
           xFormat: (v) => fmtTick(v, xTickVals),
           yFormat: (v) => fmtTick(v, yTicks),
           grid: true,
         });
+        if (log)
+          for (const tv of xTickVals) {
+            draw.line(ctx, xAt(tv), box.top + box.height, xAt(tv), box.top + box.height + 4, { color: theme.muted, width: 1 });
+            draw.text(ctx, fmtTick(tv, xTickVals), xAt(tv), box.top + box.height + 14, { kind: "mono", align: "center", color: theme.faint });
+          }
         const bw = (box.width / count) * 0.78;
+        const binX = (b: number) => (log ? (xAt(edge(b)) + xAt(edge(b + 1))) / 2 : integer ? xAt(lo + b) : xAt(lo + (b + 0.5) * width1));
         shares.forEach((sh, b) => {
-          const x = integer ? xAt(lo + b) : xAt(lo + (b + 0.5) * width1);
+          const x = binX(b);
           if (sh > 0) draw.rect(ctx, x - bw / 2, ax.y(sh), bw, ax.y(0) - ax.y(sh), { color: theme.muted, fill: theme.muted, width: 0.5 });
         });
         if (expected.length) {
-          const pts: [number, number][] = expected.map((p, b) => [integer ? xAt(lo + b) : xAt(lo + (b + 0.5) * width1), ax.y(Math.max(0, Math.min(top, p)))]);
+          const pts: [number, number][] = expected.map((p, b) => [binX(b), ax.y(Math.max(0, Math.min(top, p)))]);
           draw.polyline(ctx, pts, { color: theme.accent, width: 1.75 });
           for (const [x, y] of pts) draw.dot(ctx, x, y, 2.5, theme.accent);
           draw.text(ctx, "expected", box.left + box.width - 2, box.top + 4, { color: theme.accent, align: "right" });
