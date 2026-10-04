@@ -188,6 +188,20 @@ export interface DemoSpec {
   controls: ControlSpec[];
   readouts: ReadoutSpec[];
   beats: Beat[];
+  /** Numeric values the text pins down, checked against the rendered readouts (no model needed). */
+  expect?: Expectation[];
+}
+
+/** A readout value the demo must show at a beat (verified deterministically after the stage settles). */
+export interface Expectation {
+  /** Beat index the value applies to (the demo shows that beat's params). */
+  beat: number;
+  /** ReadoutSpec.id */
+  readout: string;
+  /** Expected numeric value of the readout at that beat. */
+  value: number;
+  /** Relative tolerance (default 0.02); 0 means exact. */
+  tol?: number;
 }
 
 export interface DemoPlan {

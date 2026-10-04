@@ -1,10 +1,11 @@
 // Orchestrator: PDF pages → anchors → page images → demo plan → demos, for one
 // book. Everything is reported through `emit` (the CLI renders it).
 //
-// Speed comes from streaming rather than stages: the planner hands over each
-// demo the moment it is accepted, and every demo then runs as one task —
-// build → typecheck → verify → revise — while other demos are still being
-// planned or built. One Vite server and one Chromium are shared by all demos.
+// Speed comes from streaming rather than stages: a short outline hands over each
+// demo the moment it is outlined, and every demo then runs as one task — spec +
+// code in one reply → typecheck → deterministic checks → (one) review — while
+// other demos are still being outlined or built. One Vite server and one
+// Chromium are shared by all demos.
 // Unchanged work is skipped (hash of inputs per step) unless `force` is set.
 
 import fs from "node:fs";
@@ -18,9 +19,9 @@ import { emit, setEmit } from "./lib/report";
 import { assembleUnit, assembleVariants, anchorUnit, renderUnit } from "./content/index";
 import { fileHash, hash, readCache, updateCache } from "./demos/cache";
 import { loadCtx, loadPlan, paths } from "./demos/common";
-import { buildDemo, loadConvo, reviseDemo } from "./demos/build";
-import { planInputHash, planUnit } from "./demos/plan";
-import { closeEnv, type DemoResult, previousVerdict, startEnv, type VerifyEnv, verifyDemo, writeReport } from "./demos/verify";
+import { buildDemo, buildEffort, generateDemo, loadConvo, reviseDemo, warmBuilder } from "./demos/build";
+import { legacyPlanner, type OutlineDemo, PlanAssembler, PLAN_KEY_PREFIX, planInputHash, planOutline, planUnit } from "./demos/plan";
+import { closeEnv, type DemoResult, previousVerdict, startEnv, type VerifyEnv, verifyDemoChecked, writeReport } from "./demos/verify";
 
 export type { Stage };
 
@@ -189,6 +190,21 @@ async function runUnitDemos(
     );
   };
 
+  /** An outlined demo: spec + code in one conversation, then the checked verify loop. */
+  const enqueueOutlined = (o: OutlineDemo, plan: PlanAssembler, outlined: OutlineDemo[]) => {
+    if (!selected(o.id)) return;
+    total++;
+    emit({ type: "demo", unit, id: o.id, phase: "queued", beats: o.beats.length, title: o.title });
+    tasks.push(
+      limit.run(async () => {
+        const out = await generatedTask(book, unit, o, plan, outlined, steps, opts, getEnv);
+        if (doBuild) emit({ type: "progress", unit, stage: "build", done: ++built, total, label: "demos" });
+        if (doVerify) emit({ type: "progress", unit, stage: "verify", done: ++verified, total, label: "demos" });
+        return out;
+      }),
+    );
+  };
+
   // Plan (streamed) or reuse the existing plan.
   const planFile = paths.plan(slug, unit);
   // A re-plan streams into plan.json; keep the previous plan until it completes, and put
@@ -199,10 +215,12 @@ async function runUnitDemos(
   if (steps.has("plan")) {
     const inputHash = planInputHash(book, unit, hash);
     const cache = readCache(slug, unit);
-    const upToDate = fs.existsSync(planFile) && !opts.force && (cache.plan === inputHash || cache.plan === undefined);
+    // Plans keyed by an older scheme (or not at all) are adopted, not re-planned.
+    const legacy = cache.plan === undefined || !cache.plan.startsWith(PLAN_KEY_PREFIX);
+    const upToDate = fs.existsSync(planFile) && !opts.force && (cache.plan === inputHash || legacy);
     if (upToDate) {
       emit({ type: "stage", unit, stage: "plan", status: "skip", detail: "unchanged" });
-      if (cache.plan === undefined) updateCache(slug, unit, (c) => void (c.plan = inputHash));
+      if (cache.plan !== inputHash) updateCache(slug, unit, (c) => void (c.plan = inputHash));
       demos = loadPlan(slug, unit).demos;
       for (const d of demos) enqueue(d);
     } else {
@@ -210,24 +228,48 @@ async function runUnitDemos(
       // Building/verifying overlaps planning: each demo starts as soon as it is accepted.
       if (doVerify) void getEnv();
       if (fs.existsSync(planFile)) fs.copyFileSync(planFile, planBackup);
-      const plan = await planUnit(book, unit, { onDemo: enqueue });
-      updateCache(slug, unit, (c) => void (c.plan = inputHash));
-      fs.rmSync(planBackup, { force: true });
-      demos = plan.demos;
-      emit({ type: "stage", unit, stage: "plan", status: "done", detail: `${demos.length} demos` });
+      if (legacyPlanner()) {
+        const plan = await planUnit(book, unit, { onDemo: enqueue });
+        updateCache(slug, unit, (c) => void (c.plan = inputHash));
+        fs.rmSync(planBackup, { force: true });
+        demos = plan.demos;
+        emit({ type: "stage", unit, stage: "plan", status: "done", detail: `${demos.length} demos` });
+      } else {
+        // Outline first (short, streamed); each outlined demo immediately gets its own
+        // spec + code conversation. plan.json fills in as specs are accepted.
+        const outlined: OutlineDemo[] = [];
+        const assembler = new PlanAssembler(book, unit, { demos: outlined });
+        // Write the builder prompt to the cache while the outline streams (demos then only read it).
+        if (doBuild) void warmBuilder(book, buildEffort());
+        await planOutline(book, unit, {
+          onDemo: (o) => {
+            outlined.push(o);
+            enqueueOutlined(o, assembler, outlined);
+          },
+        });
+        emit({ type: "stage", unit, stage: "plan", status: "done", detail: `${outlined.length} demos` });
+        emit({ type: "plan", unit, demos: outlined.map((o) => ({ id: o.id, title: o.title, beats: o.beats.length })) });
+        const outcomes = await Promise.all(tasks);
+        const plan = assembler.finish();
+        updateCache(slug, unit, (c) => void (c.plan = inputHash));
+        fs.rmSync(planBackup, { force: true });
+        return finishUnit(outcomes, plan.demos.length);
+      }
     }
   } else {
     demos = loadPlan(slug, unit).demos;
     for (const d of demos) enqueue(d);
   }
   emit({ type: "plan", unit, demos: demos.map((d) => ({ id: d.id, title: d.title, beats: d.beats.length })) });
+  return finishUnit(await Promise.all(tasks), demos.length);
 
-  const outcomes = await Promise.all(tasks);
-  if (doBuild) emit({ type: "stage", unit, stage: "build", status: "done" });
-  const results = outcomes.map((o) => o.result).filter((r): r is DemoResult => !!r);
-  if (results.length) writeReport(book, unit, results);
-  if (doVerify) emit({ type: "stage", unit, stage: "verify", status: "done", detail: `${outcomes.filter((o) => o.ok).length}/${outcomes.length} demos pass` });
-  return outcomes;
+  function finishUnit(outcomes: DemoOutcome[], _planned: number): DemoOutcome[] {
+    if (doBuild) emit({ type: "stage", unit, stage: "build", status: "done" });
+    const results = outcomes.map((o) => o.result).filter((r): r is DemoResult => !!r);
+    if (results.length) writeReport(book, unit, results);
+    if (doVerify) emit({ type: "stage", unit, stage: "verify", status: "done", detail: `${outcomes.filter((o) => o.ok).length}/${outcomes.length} demos pass` });
+    return outcomes;
+  }
 }
 
 /** One demo: build (or reuse) → optional revise → verify (with fix rounds). */
@@ -272,12 +314,50 @@ async function demoTask(book: BookConfig, unit: string, spec: DemoSpec, steps: S
         return { id: spec.id, ok: true };
       }
     }
-    const result = await verifyDemo(await getEnv(), loadCtx(book, unit), spec, opts.rounds ?? 2);
+    const result = await verifyDemoChecked(await getEnv(), loadCtx(book, unit), spec, { rounds: opts.rounds ?? 2 });
     updateCache(slug, unit, (c) => void (c.demos[spec.id] = { ...c.demos[spec.id], code: fileHash(file), verified: result.pass }));
     return { id: spec.id, ok: result.pass, why: result.pass ? undefined : result.beats.find((b) => !b.pass)?.issues[0] ?? "verify failed", result };
   } catch (e) {
     emit({ type: "demo", unit, id: spec.id, phase: "fail", detail: (e as Error).message });
     return { id: spec.id, ok: false, why: (e as Error).message };
+  }
+}
+
+/** One outlined demo: spec + code in one reply (generateDemo), then the checked verify loop. */
+async function generatedTask(
+  book: BookConfig,
+  unit: string,
+  o: OutlineDemo,
+  plan: PlanAssembler,
+  outlined: OutlineDemo[],
+  steps: Set<Stage>,
+  opts: RunOpts,
+  getEnv: () => Promise<VerifyEnv>,
+): Promise<DemoOutcome> {
+  const slug = book.slug;
+  try {
+    const g = await generateDemo(plan.c, o, plan, outlined);
+    if (!g.spec) {
+      emit({ type: "demo", unit, id: o.id, phase: "fail", detail: g.why });
+      return { id: o.id, ok: false, why: g.why ?? "no usable spec" };
+    }
+    const spec = g.spec;
+    const file = paths.component(slug, unit, spec.component);
+    updateCache(slug, unit, (c) => void (c.demos[spec.id] = { spec: hash(JSON.stringify(spec)), code: fileHash(file), verified: false }));
+    if (!g.ok) {
+      emit({ type: "demo", unit, id: spec.id, phase: "fail", detail: "does not typecheck" });
+      return { id: spec.id, ok: false, why: g.why ?? "build failed (typecheck)" };
+    }
+    if (!steps.has("verify")) {
+      emit({ type: "demo", unit, id: spec.id, phase: "pass", detail: "built (not verified)" });
+      return { id: spec.id, ok: true };
+    }
+    const result = await verifyDemoChecked(await getEnv(), plan.c, spec, { rounds: opts.rounds ?? 2 });
+    updateCache(slug, unit, (c) => void (c.demos[spec.id] = { ...c.demos[spec.id], code: fileHash(file), verified: result.pass }));
+    return { id: spec.id, ok: result.pass, why: result.pass ? undefined : (result.beats.find((b) => !b.pass)?.issues[0] ?? "verify failed"), result };
+  } catch (e) {
+    emit({ type: "demo", unit, id: o.id, phase: "fail", detail: (e as Error).message });
+    return { id: o.id, ok: false, why: (e as Error).message };
   }
 }
 

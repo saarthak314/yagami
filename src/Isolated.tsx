@@ -1,5 +1,6 @@
 // `/?demo=<book>/<unit>/<demoId>&beat=<index>`: only the demo pane, for
-// automated screenshots. Exposes window.__demoReady and window.__demoErrors.
+// automated screenshots. Exposes window.__demoReady, window.__demoErrors and (from the
+// kit's Stage) window.__stageText / __stageSize for layout checks.
 
 import { useCallback, useEffect, useState } from "react";
 import { planFor } from "./lib/data";
@@ -21,6 +22,8 @@ const push = (e: unknown) => {
 /** Collect every error the page produces into window.__demoErrors. Call once, before render. */
 export function installErrorCapture() {
   window.__demoErrors = [];
+  // Stages record their text boxes (window.__stageText) for the verifier's layout checks.
+  window.__yagamiInstrument = true;
   window.addEventListener("error", (e) => push(e.error ?? e.message));
   window.addEventListener("unhandledrejection", (e) => push(e.reason));
   const consoleError = console.error.bind(console);

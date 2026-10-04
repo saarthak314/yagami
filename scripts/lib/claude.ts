@@ -118,6 +118,29 @@ async function run(opts: CallOpts, format?: ReturnType<typeof betaZodOutputForma
   return message;
 }
 
+/**
+ * Pre-warm the prompt cache for a shared system prompt (cache_control on its blocks): a
+ * non-streaming `max_tokens: 0` request runs prefill only, writing the cache entry once so
+ * parallel requests that start right after it read the prefix instead of each writing it.
+ * Thinking and effort must match the real requests (both are part of the cached prefix).
+ * Best effort: failures are swallowed (the real requests then simply write the cache).
+ */
+export async function prewarm(opts: { model: Model; effort: Effort; label: string; system: Anthropic.Beta.BetaTextBlockParam[] }): Promise<void> {
+  try {
+    const message = await client.beta.messages.create({
+      model: opts.model,
+      max_tokens: 0,
+      thinking: { type: "adaptive" },
+      output_config: { effort: opts.effort },
+      system: opts.system,
+      messages: [{ role: "user", content: "warmup" }],
+    });
+    logUsage(opts.label, opts.model, message.usage);
+  } catch {
+    // not worth failing a run over
+  }
+}
+
 export function textOf(message: Anthropic.Beta.BetaMessage): string {
   return message.content
     .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")

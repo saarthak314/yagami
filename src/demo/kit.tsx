@@ -60,6 +60,70 @@ export interface StageProps {
   onPointerUp?: () => void;
 }
 
+/**
+ * A text box drawn on the stage (CSS px, stage coordinates). Recorded only in
+ * isolated mode (automated checks: overlapping or clipped labels).
+ */
+export interface StageTextBox {
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Drawn under a rotation (its box is the axis-aligned bounds). */
+  rotated?: boolean;
+}
+
+declare global {
+  interface Window {
+    /** Set by isolated mode: stages record their text boxes each frame. */
+    __yagamiInstrument?: boolean;
+    /** Text boxes of the last completed frame. */
+    __stageText?: StageTextBox[];
+    __stageSize?: { w: number; h: number };
+  }
+}
+
+/** Wrap fillText/strokeText so every string drawn on this context is measured into `sink()`. */
+function instrumentText(ctx: CanvasRenderingContext2D, dpr: number, sink: () => StageTextBox[]) {
+  const record = (text: string, x: number, y: number, maxWidth?: number) => {
+    const s = String(text);
+    if (!s.trim() || ctx.globalAlpha < 0.05) return;
+    const m = ctx.measureText(s);
+    const k = maxWidth !== undefined && m.width > maxWidth && m.width > 0 ? maxWidth / m.width : 1;
+    const l = x - m.actualBoundingBoxLeft * k;
+    const r = x + m.actualBoundingBoxRight * k;
+    const t = y - m.actualBoundingBoxAscent;
+    const b = y + m.actualBoundingBoxDescent;
+    const tf = ctx.getTransform();
+    const pts = [
+      [l, t],
+      [r, t],
+      [r, b],
+      [l, b],
+    ].map(([px, py]) => [(tf.a * px + tf.c * py + tf.e) / dpr, (tf.b * px + tf.d * py + tf.f) / dpr]);
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    const x0 = Math.min(...xs);
+    const y0 = Math.min(...ys);
+    const box: StageTextBox = { text: s, x: x0, y: y0, w: Math.max(...xs) - x0, h: Math.max(...ys) - y0 };
+    if (Math.abs(tf.b) > 1e-6 || Math.abs(tf.c) > 1e-6) box.rotated = true;
+    sink().push(box);
+  };
+  const fill = ctx.fillText.bind(ctx);
+  const strokeT = ctx.strokeText.bind(ctx);
+  ctx.fillText = (text: string, x: number, y: number, maxWidth?: number) => {
+    if (maxWidth === undefined) fill(text, x, y);
+    else fill(text, x, y, maxWidth);
+    record(text, x, y, maxWidth);
+  };
+  ctx.strokeText = (text: string, x: number, y: number, maxWidth?: number) => {
+    if (maxWidth === undefined) strokeT(text, x, y);
+    else strokeT(text, x, y, maxWidth);
+    record(text, x, y, maxWidth);
+  };
+}
+
 export function Stage({
   width,
   height,
@@ -90,6 +154,10 @@ export function Stage({
     canvas.height = Math.round(height * dpr);
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    // Isolated mode (automated checks) records every text box drawn per frame; no cost otherwise.
+    const instrument = window.__yagamiInstrument === true;
+    let boxes: StageTextBox[] = [];
+    if (instrument) instrumentText(ctx, dpr, () => boxes);
     let raf = 0;
     let last = performance.now();
     const tick = (now: number) => {
@@ -101,7 +169,12 @@ export function Stage({
       ctx.clearRect(0, 0, width, height);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
+      if (instrument) boxes = [];
       frameRef.current(ctx, { dt, t: tRef.current, width, height });
+      if (instrument) {
+        window.__stageText = boxes;
+        window.__stageSize = { w: width, h: height };
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);

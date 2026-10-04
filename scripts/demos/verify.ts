@@ -17,7 +17,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { callJson, MODELS, pool } from "../lib/claude";
 import { Limit } from "../lib/limit";
 import { emit } from "../lib/report";
-import type { BookConfig, DemoSpec } from "../../src/types";
+import type { BookConfig, DemoSpec, Expectation } from "../../src/types";
 import { loadConvo, runConvo } from "./build";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
 import { domainOf } from "./domains";
@@ -182,6 +182,302 @@ async function shootDemo(env: VerifyEnv, c: Ctx, demo: DemoSpec, outDir: string)
   );
 }
 
+// --- Deterministic checks --------------------------------------------------------
+//
+// Run before any model review: everything a script can decide (errors, a blank
+// stage, broken readouts, values the text pins down, overlapping or clipped
+// labels) is decided here and fed back to the builder as precise notes, so a
+// model review is only spent on what needs judgement.
+
+/** Text box recorded by the kit's Stage in isolated mode (CSS px, stage coordinates). */
+interface TextBox {
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  rotated?: boolean;
+}
+
+/** One beat rendered for the checks: a single settled screenshot plus what the page reports. */
+export interface CheckShot {
+  beat: number;
+  anchor: string;
+  ready: boolean;
+  errors: string[];
+  readouts: Record<string, string>;
+  /** Fraction of stage pixels that changed over the last ~0.4 s before the screenshot. */
+  changed: number;
+  /** Fraction of stage pixels that differ from the background. */
+  ink: number;
+  /** Full demo-pane screenshot at the settle time. */
+  shot: string;
+  text: TextBox[];
+  /** Text boxes ~0.4 s earlier: an overlap must be present in both samples (moving labels cross others briefly). */
+  textBefore?: TextBox[];
+  stage: { w: number; h: number } | null;
+}
+
+export interface CheckResult {
+  /** Every deterministic check passed. */
+  ok: boolean;
+  /** Machine-written, actionable notes (empty when ok). */
+  notes: string[];
+  /** Checks passed and a model review is still wanted (the orchestrator decides whether to spend it). */
+  needsReview: boolean;
+  shots: CheckShot[];
+  /** All beats tiled into one image (for the model review). */
+  sheet: string;
+}
+
+/** Settle time before the screenshot; the stage is sampled twice ~0.4 s apart to measure motion. */
+const SETTLE_MS = 1000;
+const MOTION_GAP_MS = 400;
+
+/** Thresholds (tuned on the existing library; see work/qa/checks/report.json). */
+export const CHECK_LIMITS = {
+  /** A stage is blank when it draws no labels and less than this fraction of its pixels differ from the background… */
+  blankInk: 0.0015,
+  /** …or, even with labels, when almost nothing is drawn at all. */
+  blankInkHard: 0.0002,
+  /** Labels may overhang the stage edge by this much (px) before they count as clipped. */
+  edgeSlack: 1.5,
+  /** Two labels overlap when their boxes intersect by more than this in both directions (px)… */
+  overlapPx: 2.5,
+  /** …and the intersection covers at least this share of the smaller box. */
+  overlapShare: 0.2,
+  /** Default relative tolerance for expected values. */
+  tol: 0.02,
+};
+
+async function inkFraction(png: Buffer): Promise<number> {
+  const { data, info } = await sharp(png).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const ch = info.channels;
+  // Background = the most common colour among the four corners.
+  const at = (x: number, y: number) => {
+    const i = (y * info.width + x) * ch;
+    return [data[i], data[i + 1], data[i + 2]];
+  };
+  const corners = [at(0, 0), at(info.width - 1, 0), at(0, info.height - 1), at(info.width - 1, info.height - 1)];
+  const bg = corners.sort((a, b) => corners.filter((c) => c.join() === b.join()).length - corners.filter((c) => c.join() === a.join()).length)[0];
+  let ink = 0;
+  for (let i = 0; i < data.length; i += ch) if (Math.abs(data[i] - bg[0]) + Math.abs(data[i + 1] - bg[1]) + Math.abs(data[i + 2] - bg[2]) > 30) ink++;
+  return ink / (data.length / ch);
+}
+
+async function shootSettled(page: Page, env: VerifyEnv, c: Ctx, demo: DemoSpec, beat: number, outDir: string): Promise<CheckShot> {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
+  page.on("console", (m) => {
+    if (m.type() === "error" && !/favicon|Download the React DevTools/.test(m.text())) errors.push(`console: ${m.text()}`);
+  });
+  const shot = path.join(outDir, `${demo.id}-${beat}.png`);
+  const load = async () => {
+    try {
+      await page.goto(`${env.baseUrl}/?demo=${c.book.slug}/${c.unit.unit}/${demo.id}&beat=${beat}`, { waitUntil: "load" });
+      await page.waitForFunction(() => (globalThis as unknown as { __demoReady?: boolean }).__demoReady === true, null, { timeout: 20000 });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let ready = await load();
+  // A demo file written moments ago can still be missing from Vite's module graph: reload once.
+  if (!ready || (await page.locator("canvas").count()) === 0) {
+    env.server.moduleGraph.invalidateAll();
+    await page.waitForTimeout(400);
+    errors.length = 0;
+    ready = await load();
+  }
+  if (!ready) errors.push("demo did not become ready within 20s (window.__demoReady never set)");
+  const stage = page.locator("[data-stage] canvas, canvas").first();
+  const hasStage = (await stage.count()) > 0;
+  await page.waitForTimeout(SETTLE_MS - MOTION_GAP_MS);
+  const s1 = hasStage ? await stage.screenshot().catch(() => null) : null;
+  const textBefore = await page.evaluate(() => (globalThis as unknown as { __stageText?: TextBox[] }).__stageText ?? []).catch(() => [] as TextBox[]);
+  await page.waitForTimeout(MOTION_GAP_MS);
+  const s2 = hasStage ? await stage.screenshot().catch(() => null) : null;
+  await page.screenshot({ path: shot });
+  const changed = s1 && s2 ? await stageDiff(s1, s2) : 0;
+  const ink = s2 ? await inkFraction(s2) : 0;
+  if (!hasStage) errors.push("no <canvas> stage rendered");
+  const info = await page
+    .evaluate(() => {
+      const w = globalThis as unknown as { __demoErrors?: unknown[]; __stageText?: TextBox[]; __stageSize?: { w: number; h: number } };
+      return { appErrors: w.__demoErrors ?? [], text: w.__stageText ?? [], stage: w.__stageSize ?? null };
+    })
+    .catch(() => ({ appErrors: [] as unknown[], text: [] as TextBox[], stage: null }));
+  for (const e of info.appErrors) errors.push(`app: ${typeof e === "string" ? e : JSON.stringify(e)}`);
+  const readouts = await page
+    .$$eval("[data-readout]", (els) => Object.fromEntries(els.map((el) => [el.getAttribute("data-readout") ?? "", (el.textContent ?? "").trim()])))
+    .catch(() => ({}) as Record<string, string>);
+  return { beat, anchor: demo.beats[beat].anchor, ready, errors: [...new Set(errors)], readouts, changed, ink, shot, text: info.text, textBefore, stage: info.stage };
+}
+
+const SUPER: Record<string, string> = { "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "⁻": "-", "⁺": "+" };
+
+/**
+ * Every number in a readout's text, in order: handles unicode minus, thousands
+ * separators, e-notation, "×10^k" / "×10ᵏ" / "·10^k", and "%" (both the shown
+ * value and the fraction are candidates).
+ */
+export function numbersIn(text: string): number[] {
+  const t = text
+    .replace(/[−‒–]/g, "-")
+    .replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺]+/g, (m) => "^" + [...m].map((ch) => SUPER[ch]).join(""))
+    .replace(/(\d),(\d{3})(?!\d)/g, "$1$2")
+    .replace(/(\d)[   ](\d{3})(?!\d)/g, "$1$2");
+  const out: number[] = [];
+  const re = /(-?\d+(?:\.\d+)?|-?\.\d+)(?:[eE]([+-]?\d+))?(?:\s*[×x·*]\s*10\s*\^\s*\(?([+-]?\d+)\)?)?(\s*%)?/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(t))) {
+    let v = Number(m[1]);
+    if (m[2]) v *= 10 ** Number(m[2]);
+    if (m[3]) v *= 10 ** Number(m[3]);
+    if (!Number.isFinite(v)) continue;
+    out.push(v);
+    if (m[4]) out.push(v / 100);
+  }
+  return out;
+}
+
+const close = (got: number, want: number, tol: number) => (tol === 0 ? Math.abs(got - want) < 1e-9 * Math.max(1, Math.abs(want)) : Math.abs(got - want) <= tol * Math.max(Math.abs(want), 1e-12));
+
+/** A readout that shows no usable value (never published, or a broken number). */
+const BROKEN = /\b(NaN|Infinity|undefined|null)\b/;
+
+function boxesOverlap(a: TextBox, b: TextBox): { x: number; y: number } | null {
+  const ix = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const iy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  if (ix <= CHECK_LIMITS.overlapPx || iy <= CHECK_LIMITS.overlapPx) return null;
+  const minArea = Math.min(a.w * a.h, b.w * b.h);
+  if (minArea <= 0 || (ix * iy) / minArea < CHECK_LIMITS.overlapShare) return null;
+  return { x: Math.round(Math.max(a.x, b.x) + ix / 2), y: Math.round(Math.max(a.y, b.y) + iy / 2) };
+}
+
+/** Overlapping label pairs on one frame; `key` identifies the pair with digits ignored. */
+function overlapsOf(text: TextBox[]): { a: string; b: string; x: number; y: number; key: string }[] {
+  const flat = text.filter((b) => !b.rotated && b.w > 0 && b.h > 0);
+  const out: { a: string; b: string; x: number; y: number; key: string }[] = [];
+  const norm = (t: string) => t.replace(/\d/g, "#");
+  for (let i = 0; i < flat.length; i++)
+    for (let j = i + 1; j < flat.length; j++) {
+      const a = flat[i];
+      const b = flat[j];
+      // The same string drawn twice at the same spot (e.g. a shadow pass) is not a collision.
+      if (a.text === b.text && Math.abs(a.x - b.x) < 2 && Math.abs(a.y - b.y) < 2) continue;
+      const o = boxesOverlap(a, b);
+      if (o) out.push({ a: a.text, b: b.text, ...o, key: [norm(a.text), norm(b.text)].sort().join("\u0000") });
+    }
+  return out;
+}
+
+const q = (s: string) => `"${s.length > 40 ? s.slice(0, 39) + "…" : s}"`;
+
+/** Per-beat findings for one rendered beat (without the beat prefix, so equal findings group across beats). */
+export function findings(demo: DemoSpec, s: CheckShot, expect: Expectation[]): string[] {
+  const out: string[] = [];
+  if (!s.ready) return ["the demo did not render (no __demoReady within 20 s)"];
+  for (const e of s.errors) out.push(`runtime error: ${e}`);
+  // Sparse stages (a few dots and small labels) are fine: blank means no labels and almost no ink.
+  if (s.stage && (s.ink < CHECK_LIMITS.blankInkHard || (s.ink < CHECK_LIMITS.blankInk && s.text.length === 0))) out.push("the stage is blank (nothing drawn after 1 s)");
+
+  // Readouts.
+  const shown = demo.readouts.map((r) => ({ r, text: s.readouts[r.id] }));
+  for (const { r, text } of shown) {
+    if (text === undefined) out.push(`readout ${q(r.label)} (${r.id}) is missing from the page`);
+    else if (BROKEN.test(text)) out.push(`readout ${q(r.label)} (${r.id}) shows ${q(text)}`);
+  }
+  if (shown.length && shown.every(({ text }) => text === undefined || text === "—" || text === "")) out.push("no readout was published (setReadouts was never called with these ids)");
+  for (const e of expect.filter((x) => x.beat === s.beat)) {
+    const spec = demo.readouts.find((r) => r.id === e.readout);
+    const label = spec ? `${q(spec.label)} (${e.readout})` : e.readout;
+    const text = s.readouts[e.readout];
+    if (text === undefined) continue; // already reported as missing
+    const nums = numbersIn(text);
+    const tol = e.tol ?? CHECK_LIMITS.tol;
+    if (!nums.some((n) => close(n, e.value, tol))) out.push(`readout ${label} shows ${q(text)}, the text gives ${e.value}${tol ? ` (±${Math.round(tol * 1000) / 10}%)` : " (exact)"}`);
+  }
+
+  // Labels: clipped at the stage edge, or overlapping each other.
+  if (s.stage) {
+    const W = s.stage.w;
+    const H = s.stage.h;
+    const k = CHECK_LIMITS.edgeSlack;
+    for (const b of s.text) {
+      const where = b.x < -k ? `the left edge (x=${Math.round(b.x)})` : b.x + b.w > W + k ? `the right edge (x=${Math.round(b.x + b.w)} > ${W})` : b.y < -k ? `the top edge (y=${Math.round(b.y)})` : b.y + b.h > H + k ? `the bottom edge (y=${Math.round(b.y + b.h)} > ${H})` : null;
+      if (where) out.push(`label ${q(b.text)} is clipped at ${where}`);
+    }
+    // Overlaps that persist: present in both samples (~0.4 s apart) for the same pair of labels
+    // (digits ignored, values change) at about the same place. A label riding on a moving
+    // object that crosses another one for a moment is not a layout problem.
+    const before = s.textBefore ? overlapsOf(s.textBefore) : null;
+    for (const o of overlapsOf(s.text)) {
+      if (before && !before.some((p) => p.key === o.key && Math.hypot(p.x - o.x, p.y - o.y) < 12)) continue;
+      out.push(`labels ${q(o.a)} and ${q(o.b)} overlap at (${o.x},${o.y})`);
+    }
+  }
+  return [...new Set(out)];
+}
+
+/** Group equal findings across beats: "beats 1,3: …". */
+function groupNotes(perBeat: { beat: number; notes: string[] }[]): string[] {
+  const by = new Map<string, number[]>();
+  for (const { beat, notes } of perBeat) for (const n of notes) by.set(n, [...(by.get(n) ?? []), beat]);
+  return [...by.entries()].map(([n, beats]) => `${beats.length > 1 ? "beats" : "beat"} ${beats.join(",")}: ${n}`);
+}
+
+/** Tile the beat screenshots into one image (downscaled), each labelled with its beat. */
+async function contactSheet(shots: CheckShot[], file: string, scale = 0.5): Promise<string> {
+  const usable = shots.filter((s) => fs.existsSync(s.shot));
+  if (!usable.length) return "";
+  const tw = Math.round(VIEWPORT.width * scale);
+  const th = Math.round(VIEWPORT.height * scale);
+  const cols = Math.min(3, usable.length);
+  const rows = Math.ceil(usable.length / cols);
+  const gap = 8;
+  const label = 18;
+  const tiles = await Promise.all(
+    usable.map(async (s, i) => {
+      const img = await sharp(s.shot).resize(tw, th, { fit: "contain", background: "#0a0a0a" }).png().toBuffer();
+      const cap = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${tw}" height="${label}"><text x="2" y="13" font-family="sans-serif" font-size="12" fill="#a1a1a1">beat ${s.beat}</text></svg>`);
+      const left = (i % cols) * (tw + gap);
+      const top = Math.floor(i / cols) * (th + label + gap);
+      return [
+        { input: cap, left, top },
+        { input: img, left, top: top + label },
+      ];
+    }),
+  );
+  await sharp({ create: { width: cols * tw + (cols - 1) * gap, height: rows * (th + label) + (rows - 1) * gap, channels: 3, background: "#000000" } })
+    .composite(tiles.flat())
+    .png()
+    .toFile(file);
+  return file;
+}
+
+/** Render every beat once (settled) and run the deterministic checks. No model calls. */
+export async function checkDemo(env: VerifyEnv, c: Ctx, demo: DemoSpec, outDir = paths.verifyDir(c.book.slug, c.unit.unit)): Promise<CheckResult> {
+  fs.mkdirSync(outDir, { recursive: true });
+  env.server.moduleGraph.invalidateAll();
+  const shots = await Promise.all(
+    demo.beats.map((_, i) =>
+      env.pages.run(async () => {
+        const page = await env.browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
+        try {
+          return await shootSettled(page, env, c, demo, i, outDir);
+        } finally {
+          await page.close().catch(() => undefined);
+        }
+      }),
+    ),
+  );
+  const expect = (demo.expect ?? []).filter((e) => e.beat >= 0 && e.beat < demo.beats.length);
+  const notes = groupNotes(shots.map((s) => ({ beat: s.beat, notes: findings(demo, s, expect) })));
+  const sheet = await contactSheet(shots, path.join(outDir, `${demo.id}-sheet.png`));
+  return { ok: notes.length === 0, notes, needsReview: notes.length === 0, shots, sheet };
+}
+
 // --- Review -----------------------------------------------------------------
 
 function reviewSystem(book: BookConfig): string {
@@ -252,7 +548,7 @@ function feedback(results: BeatResult[]): Anthropic.Beta.BetaMessageParam {
     },
   ];
   for (const r of failing.slice(0, 4)) if (r.shots[1] && fs.existsSync(r.shots[1])) content.push({ type: "text", text: `Beat ${r.beat}:` }, pngBlock(fs.readFileSync(r.shots[1])));
-  content.push({ type: "text", text: 'Fix every issue and reply with the complete corrected file as JSON { "code": ... }.' });
+  content.push({ type: "text", text: 'Fix every issue and reply with the complete corrected file in one ```tsx block.' });
   return { role: "user", content };
 }
 
@@ -288,6 +584,127 @@ export async function verifyDemo(env: VerifyEnv, c: Ctx, demo: DemoSpec, rounds:
       log(`verify ${t} ${demo.id}: restoring best version (${best.passed}/${results.length})`);
       fs.writeFileSync(file, best.code);
       results = best.results;
+    }
+  } catch (e) {
+    log(`verify ${t} ${demo.id}: error ${(e as Error).message}`);
+    if (!results.length) results = demo.beats.map((b, i) => ({ beat: i, anchor: b.anchor, ready: false, errors: [(e as Error).message], readouts: {}, changed: 0, shots: ["", ""] as [string, string], pass: false, issues: [(e as Error).message] }));
+  }
+  const passed = results.filter((r) => r.pass).length;
+  const pass = results.length > 0 && passed === results.length;
+  emit({ type: "demo", unit, id: demo.id, phase: pass ? "pass" : "fail", round, beatsPassed: passed, beats: results.length, detail: pass ? undefined : results.find((r) => !r.pass)?.issues[0] });
+  return { id: demo.id, component: demo.component, rounds: round, pass, beats: results };
+}
+
+// --- Contact-sheet review + the checked verify loop --------------------------------
+//
+// The deterministic checks run first; only a demo that passes them is shown to the
+// model, once, as a single contact sheet of all beats. At most one revision round is
+// spent on the review's findings.
+
+const SheetReviewSchema = z.object({ pass: z.boolean(), issues: z.array(z.string()) });
+
+function sheetSystem(book: BookConfig): string {
+  const d = domainOf(book.domain);
+  return `You review ${d.demoNoun}s that accompany "${book.title}". You get ONE contact sheet: every beat of a demo rendered once after ~1 s (caption, stage, controls and readouts), plus each beat's caption, the anchored paragraph and the readout values as text, and the demo brief.
+
+Layout and numbers were already checked by a script: no runtime errors, no blank stage, no clipped or overlapping labels, readouts present and the values the text pins down are correct. Do not re-check those. Judge only what needs understanding:
+- does each beat's stage show what its caption and paragraph describe (the right objects, the right behaviour, the right trend when a control changes between beats)?
+${d.reviewChecks}
+- would a reader be misled by the picture?
+
+The images are small; do not fail for legibility or taste. Mid-animation values are partial. Default to pass; fail only when ${d.reviewer} would agree the demo is wrong or misleading. Issues (at most 4) must say which beat, what is wrong and what it should be. Reply as JSON { "pass": boolean, "issues": string[] }.`;
+}
+
+/** One model review of a demo that passed the deterministic checks (one contact-sheet image). */
+export async function reviewSheet(c: Ctx, demo: DemoSpec, check: CheckResult): Promise<{ pass: boolean; issues: string[] }> {
+  const content: Anthropic.Beta.BetaContentBlockParam[] = [
+    { type: "text", text: `Demo "${demo.title}" (${demo.id}).\n\nBrief:\n${demo.brief}\n\nControls: ${JSON.stringify(demo.controls)}\nReadouts: ${JSON.stringify(demo.readouts)}` },
+  ];
+  for (const s of check.shots) {
+    const b = demo.beats[s.beat];
+    content.push({
+      type: "text",
+      text: `\n## Beat ${s.beat}\nPreset: ${b.preset}${b.params ? `, params ${JSON.stringify(b.params)}` : ""}\nCaption: ${b.caption}\nParagraph (${textSourceNote(c.book).name}):\n${anchorContext(c, b.anchor, 0, 0)}\nReadouts: ${JSON.stringify(s.readouts)}\nStage motion over 0.4 s: ${(s.changed * 100).toFixed(1)}% of pixels`,
+    });
+  }
+  if (check.sheet && fs.existsSync(check.sheet)) content.push({ type: "text", text: "Contact sheet (beats left to right, top to bottom):" }, pngBlock(fs.readFileSync(check.sheet)));
+  content.push({ type: "text", text: "Review the demo. Reply as JSON." });
+  const { data } = await callJson(SheetReviewSchema, {
+    model: MODELS.sonnet,
+    effort: "medium",
+    label: `verify:${tag(c.book.slug, c.unit.unit)}:${demo.id}`,
+    system: sheetSystem(c.book),
+    messages: [{ role: "user", content }],
+    maxTokens: 8000,
+    cache: false,
+  });
+  return { pass: data.pass, issues: data.pass ? [] : data.issues.length ? data.issues : ["the reviewer failed the demo without details"] };
+}
+
+/** Feedback for the builder from deterministic notes (and, after a review, its issues). */
+function checkFeedback(notes: string[], check: CheckResult, from: "checks" | "review"): Anthropic.Beta.BetaMessageParam {
+  const lead =
+    from === "checks"
+      ? "The demo was rendered in a headless browser (560×760 viewport) and checked automatically. These problems were found:"
+      : "The demo was rendered in a headless browser and reviewed. The reviewer found:";
+  const content: Anthropic.Beta.BetaContentBlockParam[] = [{ type: "text", text: `${lead}\n\n${notes.map((n) => `- ${n}`).join("\n")}` }];
+  if (check.sheet && fs.existsSync(check.sheet)) content.push({ type: "text", text: "All beats as rendered:" }, pngBlock(fs.readFileSync(check.sheet)));
+  content.push({ type: "text", text: 'Fix every problem (keep everything else as it is) and reply with the complete corrected file in one ```tsx block.' });
+  return { role: "user", content };
+}
+
+function toResults(check: CheckResult, pass: boolean, issues: string[]): BeatResult[] {
+  return check.shots.map((s) => {
+    const mine = issues.filter((i) => new RegExp(`\\bbeats? [\\d,]*\\b${s.beat}\\b`).test(i));
+    return { beat: s.beat, anchor: s.anchor, ready: s.ready, errors: s.errors, readouts: s.readouts, changed: s.changed, shots: [s.shot, s.shot] as [string, string], pass: pass && s.ready && !s.errors.length, issues: pass ? [] : mine.length ? mine : issues };
+  });
+}
+
+/**
+ * Checked verify loop: deterministic checks (free) until they pass or `rounds` fix
+ * rounds are spent; then one contact-sheet model review (`review: false` skips it)
+ * with at most one revision round on its findings. Same result shape as verifyDemo.
+ */
+export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, opts: { rounds?: number; review?: boolean } = {}): Promise<DemoResult> {
+  const rounds = opts.rounds ?? 2;
+  const slug = c.book.slug;
+  const unit = c.unit.unit;
+  const t = tag(slug, unit);
+  const outDir = paths.verifyDir(slug, unit);
+  const file = paths.component(slug, unit, demo.component);
+  let round = 0;
+  let results: BeatResult[] = [];
+  let reviewed = false;
+  try {
+    for (; ; round++) {
+      emit({ type: "demo", unit, id: demo.id, phase: "verifying", round, beats: demo.beats.length });
+      const check = await checkDemo(env, c, demo, outDir);
+      if (!check.ok) {
+        log(`verify ${t} ${demo.id}: round ${round}: ${check.notes.length} check notes`);
+        results = toResults(check, false, check.notes);
+        const convo = round < rounds ? loadConvo(slug, unit, demo.id) : null;
+        if (!convo) break;
+        convo.messages.push(checkFeedback(check.notes, check, "checks"));
+        await runConvo(convo, 3, "revising", round + 1);
+        continue;
+      }
+      if (opts.review === false || reviewed) {
+        results = toResults(check, true, []);
+        break;
+      }
+      const r = await reviewSheet(c, demo, check);
+      reviewed = true;
+      log(`verify ${t} ${demo.id}: round ${round}: checks pass, review ${r.pass ? "pass" : `fail (${r.issues.length})`}`);
+      results = toResults(check, r.pass, r.issues);
+      if (r.pass) break;
+      const convo = round < rounds ? loadConvo(slug, unit, demo.id) : null;
+      if (!convo) break;
+      // One revision on the review's findings; the next round re-checks deterministically, and a
+      // version that passes the checks after this revision is accepted without a second review.
+      const before = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
+      convo.messages.push(checkFeedback(r.issues, check, "review"));
+      await runConvo(convo, 3, "revising", round + 1);
+      if (before !== null && fs.existsSync(file) && fs.readFileSync(file, "utf8") === before) break;
     }
   } catch (e) {
     log(`verify ${t} ${demo.id}: error ${(e as Error).message}`);

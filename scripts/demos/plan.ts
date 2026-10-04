@@ -12,7 +12,7 @@
 import { z } from "zod";
 import type Anthropic from "@anthropic-ai/sdk";
 import { call, MODELS, textOf, type Effort } from "../lib/claude";
-import type { BookConfig, ControlSpec, DemoPlan, DemoSpec, Params, ParamValue } from "../../src/types";
+import type { BookConfig, ControlSpec, DemoPlan, DemoSpec, Expectation, Params, ParamValue } from "../../src/types";
 import { anchorLine, type Ctx, extractJson, loadCtx, log, pageImage, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
 import { domainOf } from "./domains";
 
@@ -52,8 +52,15 @@ const DemoSpecLoose = z.object({
   beats: z.array(z.object({ anchor: z.string(), preset: z.string(), caption: z.string(), params: ParamsZ.optional() })),
 });
 
-/** Bump to invalidate cached plans when the prompt or rules change. */
+/** Bump to deliberately invalidate every cached plan (prompt wording changes alone must not). */
 const PLAN_VERSION = "2";
+
+/**
+ * Prefix of plan-cache keys made by the current scheme. Keys without it come from older
+ * schemes (which also hashed the prompt text, so any prompt edit re-planned every book);
+ * run.ts adopts those instead of re-planning.
+ */
+export const PLAN_KEY_PREFIX = "p3:";
 
 // --- Verbatim-copy detection -----------------------------------------------------
 
@@ -121,7 +128,7 @@ function trimCaption(s: string, max: number): string {
 }
 
 /** Exported for tests. */
-export function fixDemo(d: DemoSpec, c: Ctx, state: PlanState, copied: CopyCheck): string[] {
+export function fixDemo(d: DemoSpec, c: Ctx, state: PlanState, copied: CopyCheck, opts: { briefMin?: number } = {}): string[] {
   const errs: string[] = [];
   const anchors = c.unit.anchors;
   const order = new Map(anchors.map((a, i) => [a.id, i]));
@@ -134,7 +141,7 @@ export function fixDemo(d: DemoSpec, c: Ctx, state: PlanState, copied: CopyCheck
   if (!/^[A-Z][A-Za-z0-9]+$/.test(d.component)) d.component = d.id.replace(/(^|-)([a-z0-9])/g, (_, __, ch: string) => ch.toUpperCase());
   while (state.components.has(d.component)) d.component = `${d.component}2`;
   d.title = clip(d.title.trim(), 48);
-  if (d.brief.length < 200) errs.push("brief is too short (at least 150 words of implementable spec)");
+  if (d.brief.length < (opts.briefMin ?? 200)) errs.push("brief is too short (at least 150 words of implementable spec)");
   if (copied.brief(d.brief)) errs.push("brief copies long passages from the text; write it in your own words");
 
   // Controls, readouts, presets.
@@ -322,7 +329,8 @@ export function planInputHash(book: BookConfig, unitId: string, h: (...p: string
   // srcset variants) change when images are re-rendered and must not trigger a re-plan.
   const { title, sections, anchors } = c.unit;
   const pages = c.unit.pages.map((p) => p.label);
-  return h(PLAN_VERSION, systemFor(book), JSON.stringify({ title, sections, anchors, pages }), JSON.stringify(c.text));
+  // Not the prompt text: editing the prompt must not re-plan (and re-pay for) every existing book.
+  return PLAN_KEY_PREFIX + h(PLAN_VERSION, JSON.stringify({ title, sections, anchors, pages }), JSON.stringify(c.text));
 }
 
 export async function planUnit(book: BookConfig, unitId: string, opts: PlanOpts = {}): Promise<DemoPlan> {
@@ -458,3 +466,271 @@ export function planEffort(): Effort {
   return e === "low" || e === "medium" || e === "high" || e === "xhigh" || e === "max" ? e : "low";
 }
 
+
+// =============================================================================
+// Outline planning (default): a short Opus outline, then every demo's full spec
+// is written in parallel together with its code (see build.ts generateDemo).
+// The legacy single-shot planner above stays available (YAGAMI_PLANNER=legacy).
+// =============================================================================
+
+/** One demo as outlined: enough to write its spec and code without the whole plan. */
+export interface OutlineDemo {
+  id: string;
+  title: string;
+  component: string;
+  /** What is drawn and manipulated (1–2 sentences). */
+  idea: string;
+  readouts: { id: string; label: string; measures: string }[];
+  beats: { anchor: string; focus: string }[];
+}
+
+const OutlineDemoZ = z.object({
+  id: z.string(),
+  title: z.string(),
+  component: z.string(),
+  idea: z.string(),
+  readouts: z.array(z.object({ id: z.string(), label: z.string(), measures: z.string().optional().default("") })),
+  beats: z.array(z.object({ anchor: z.string(), focus: z.string().optional().default("") })),
+});
+
+/** The legacy planner when YAGAMI_PLANNER=legacy (kept for A/B benchmarks). */
+export function legacyPlanner(): boolean {
+  return process.env.YAGAMI_PLANNER === "legacy";
+}
+
+function outlineSystem(book: BookConfig): string {
+  const d = domainOf(book.domain);
+  const noun = unitNoun(book);
+  const src = textSourceNote(book);
+  return `You outline interactive demos that accompany a ${noun} of "${book.title}" (${d.subject}).
+
+The reader sees the original pages on the right and one demo on the left. As they scroll, the demo whose beat is anchored to the paragraph under their reading line becomes active. Each demo is one React canvas component with presets, controls and live numerical readouts; an engineer writes its full spec and code later from your outline, the anchored paragraphs and page crops.
+
+You get the ${noun} as page images (authoritative for equations, figures and wording) and a list of paragraph anchors with id, page, kind and ${src.name}. ${src.caveat} Anchor ids are the only valid beat anchors.
+
+Propose 3–7 demos that genuinely aid understanding — about one per distinct idea worth seeing; a unit of 5+ pages usually has 5–6. Good demos let the reader see and manipulate exactly what the text describes, with readouts that check an equation or a quoted number; together they cover the ${noun} from start to end where it has substance; each is simple enough for one component (~200–400 lines). Prefer one demo with several beats over several thin demos.
+
+${d.planner}
+
+Each demo has 2–6 beats in reading order; a beat anchors to one paragraph, equation, figure or table (never a heading); an anchor holds at most one beat across the whole ${noun}.
+
+Complexity budget: each demo is ONE idea that fits a compact component (≈200 lines): one scene, at most ~4 controls and 4 readouts, presets that vary parameters of the same scene rather than switching between different scenes. If an idea needs several scenes, comparisons of many strategies or a big simulation, split it into separate demos or drop it.
+
+Keep the outline short — the detail comes later. Write in your own words. Reply with only this JSON (demos in reading order):
+
+{ "demos": [ {
+  "id": "kebab-case",
+  "title": "sentence case, ≤ 48 chars",
+  "component": "PascalCase, unique",
+  "idea": "≤ 40 words: what is drawn, what the reader manipulates, which figure it re-draws if any",
+  "readouts": [ { "id": "camelCase", "label": "short, may use $LaTeX$", "measures": "≤ 15 words" } ],
+  "beats": [ { "anchor": "<anchor id>", "focus": "≤ 20 words: what this beat shows, with the text's numbers" } ]
+} ] }`;
+}
+
+/** Normalise one outlined demo against the unit and the demos accepted so far. Returns problems (empty = ok). */
+function fixOutline(o: OutlineDemo, c: Ctx, state: PlanState): string[] {
+  const errs: string[] = [];
+  const anchors = c.unit.anchors;
+  const order = new Map(anchors.map((a, i) => [a.id, i]));
+  o.id = o.id.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "demo";
+  while (state.ids.has(o.id)) o.id = `${o.id}-2`;
+  o.component = o.component.replace(/[^A-Za-z0-9]/g, "");
+  if (!/^[A-Z][A-Za-z0-9]+$/.test(o.component)) o.component = o.id.replace(/(^|-)([a-z0-9])/g, (_, __, ch: string) => ch.toUpperCase());
+  while (state.components.has(o.component)) o.component = `${o.component}2`;
+  o.title = clip(o.title.trim(), 48);
+  const seen = new Set<string>();
+  o.readouts = o.readouts
+    .map((r) => ({ ...r, id: r.id.replace(/[^A-Za-z0-9_]/g, "") || "value" }))
+    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
+    .slice(0, 5);
+  const used = new Set(state.anchors);
+  const beats: OutlineDemo["beats"] = [];
+  for (const b of o.beats) {
+    let idx = order.get(b.anchor);
+    if (idx === undefined) continue;
+    const section = anchors[idx].section;
+    while (idx < anchors.length && (anchors[idx].kind === "heading" || used.has(anchors[idx].id))) idx++;
+    if (idx >= anchors.length || anchors[idx].section !== section) continue;
+    b.anchor = anchors[idx].id;
+    used.add(b.anchor);
+    beats.push(b);
+  }
+  beats.sort((a, b) => order.get(a.anchor)! - order.get(b.anchor)!);
+  o.beats = beats.slice(0, 6);
+  if (o.beats.length < 2) errs.push(`only ${o.beats.length} usable beat(s)`);
+  return errs;
+}
+
+export interface OutlineOpts {
+  effort?: Effort;
+  /** Called for each outlined demo the moment it is accepted. */
+  onDemo?: (o: OutlineDemo) => void;
+}
+
+/**
+ * Stream the outline; every demo is normalised locally and handed to `onDemo` as soon as
+ * it is complete (no repair calls: an unusable outline item is dropped). Returns them all.
+ */
+export async function planOutline(book: BookConfig, unitId: string, opts: OutlineOpts = {}): Promise<{ demos: OutlineDemo[]; state: PlanState }> {
+  const c = loadCtx(book, unitId);
+  const t = tag(book.slug, unitId);
+  const noun = unitNoun(book);
+  const keep = c.unit.anchors.filter((a) => !SKIP_SECTION.test(a.section));
+  const pagesWithContent = new Set(keep.map((a) => a.page));
+  const maxPx = book.source.kind === "text" ? 1100 : 1400;
+  const content: Anthropic.Beta.BetaContentBlockParam[] = [
+    { type: "text", text: `${book.title} — unit "${unitId}": ${c.unit.title}. The pages follow, in order.` },
+  ];
+  const images = await Promise.all(c.unit.pages.filter((p) => pagesWithContent.has(p.label)).map(async (p) => ({ p, img: await pageImage(c, p.label, maxPx) })));
+  for (const { p, img } of images) if (img) content.push({ type: "text", text: `Page ${p.label}:` }, pngBlock(img));
+  const sections = c.unit.sections.filter((s) => !SKIP_SECTION.test(s.id)).map((s) => `${s.id} ${s.title} (p.${s.page})`).join("\n");
+  content.push({
+    type: "text",
+    text: `Sections:\n${sections}\n\nParagraph anchors in reading order (${textSourceNote(book).name}; the page images are authoritative):\n\n${keep.map((a) => anchorLine(a, c.text, 600)).join("\n")}\n\nOutline the demos for this ${noun}.`,
+  });
+
+  const state: PlanState = { ids: new Set(), components: new Set(), anchors: new Set() };
+  const demos: OutlineDemo[] = [];
+  const consider = (raw: unknown) => {
+    const parsed = OutlineDemoZ.safeParse(raw);
+    if (!parsed.success || demos.length >= 7) return;
+    const o = parsed.data as OutlineDemo;
+    const errs = fixOutline(o, c, state);
+    if (errs.length) return log(`outline ${t}: dropped ${o.id}: ${errs.join("; ")}`);
+    state.ids.add(o.id);
+    state.components.add(o.component);
+    for (const b of o.beats) state.anchors.add(b.anchor);
+    demos.push(o);
+    log(`outline ${t}: + ${o.id} (${o.beats.length} beats)`);
+    opts.onDemo?.(o);
+  };
+  const scanner = new DemoScanner((json) => {
+    try {
+      consider(JSON.parse(json));
+    } catch (e) {
+      log(`outline ${t}: bad demo JSON (${(e as Error).message})`);
+    }
+  });
+  const { message } = await call({
+    model: MODELS.opus,
+    effort: opts.effort ?? planEffort(),
+    label: `plan:${t}`,
+    system: outlineSystem(book),
+    messages: [{ role: "user", content }],
+    maxTokens: 16000,
+    onText: (d) => scanner.push(d),
+  });
+  if (!demos.length) {
+    try {
+      const whole = extractJson(textOf(message)) as { demos?: unknown[] };
+      for (const d of whole.demos ?? []) consider(d);
+    } catch {
+      /* no JSON */
+    }
+  }
+  if (!demos.length) throw new Error(`outline ${t}: no usable demos`);
+  log(`outline ${t}: ${demos.length} demos`);
+  return { demos, state };
+}
+
+// --- Assembling the plan from per-demo specs ------------------------------------
+
+/** Loose spec as written by the builder (expectations by anchor; converted to beat indices). */
+export const GeneratedSpecZ = DemoSpecLoose.extend({
+  brief: z.string().optional().default(""),
+  // Loose on purpose: a bad expectation entry is dropped, it never rejects the spec.
+  expect: z.array(z.unknown()).optional().catch(undefined),
+});
+export type GeneratedSpec = z.infer<typeof GeneratedSpecZ>;
+
+/**
+ * Collects the per-demo specs into plan.json as they arrive (written incrementally, in
+ * reading order), running the same local fixes and checks as the single-shot planner.
+ */
+export class PlanAssembler {
+  readonly c: Ctx;
+  private readonly out: string;
+  private readonly accepted = new Map<string, DemoSpec>();
+  private readonly order: Map<string, number>;
+  private readonly copied: CopyCheck;
+
+  constructor(
+    private readonly book: BookConfig,
+    private readonly unitId: string,
+    /** Outline reservations (ids, components, anchors) of every outlined demo. */
+    private readonly outline: { demos: OutlineDemo[] },
+    out?: string,
+  ) {
+    this.c = loadCtx(book, unitId);
+    this.out = out ?? paths.plan(book.slug, unitId);
+    this.order = new Map(this.c.unit.anchors.map((a, i) => [a.id, i]));
+    const bookText = Object.values(this.c.text.text).join(" \n ");
+    const captionRuns = shingles(bookText, 9);
+    const briefRuns = shingles(bookText, 25);
+    this.copied = {
+      caption: (x) => [...shingles(x, 9)].some((r) => captionRuns.has(r)),
+      brief: (x) => [...shingles(x, 25)].some((r) => briefRuns.has(r)),
+    };
+  }
+
+  /**
+   * Validate and fix a generated spec for outline item `o` in place (identity is pinned to
+   * the outline's id/component so progress events stay consistent). Returns problems left.
+   */
+  check(raw: unknown, o: OutlineDemo): { spec?: DemoSpec; errors: string[] } {
+    const parsed = GeneratedSpecZ.safeParse(raw);
+    if (!parsed.success) return { errors: [`the spec doesn't match the DemoSpec shape: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`] };
+    const { expect: rawExpect, ...rest } = parsed.data;
+    const spec = rest as DemoSpec;
+    spec.id = o.id;
+    spec.component = o.component;
+    // Others' reservations: their outline anchors and whatever they actually used.
+    const others = this.outline.demos.filter((x) => x.id !== o.id);
+    const state: PlanState = {
+      ids: new Set(others.map((x) => x.id)),
+      components: new Set(others.map((x) => x.component)),
+      anchors: new Set([...others.flatMap((x) => x.beats.map((b) => b.anchor)), ...[...this.accepted.values()].filter((d) => d.id !== o.id).flatMap((d) => d.beats.map((b) => b.anchor))]),
+    };
+    // The builder writes the code in the same reply, so the brief is only a short note for later fixes.
+    spec.brief = (spec.brief ?? "").trim() || o.idea;
+    const errors = fixDemo(spec, this.c, state, this.copied, { briefMin: 0 });
+    spec.id = o.id;
+    spec.component = o.component;
+    const readoutIds = new Set(spec.readouts.map((r) => r.id));
+    const expect: Expectation[] = [];
+    for (const raw of rawExpect ?? []) {
+      if (!raw || typeof raw !== "object") continue;
+      const e = raw as { anchor?: unknown; beat?: unknown; readout?: unknown; value?: unknown; tol?: unknown };
+      const beat = typeof e.anchor === "string" ? spec.beats.findIndex((b) => b.anchor === e.anchor) : typeof e.beat === "number" && Number.isInteger(e.beat) && e.beat >= 0 && e.beat < spec.beats.length ? e.beat : -1;
+      const value = typeof e.value === "number" ? e.value : typeof e.value === "string" ? Number(e.value.replace(/[,\s]/g, "")) : NaN;
+      if (beat < 0 || typeof e.readout !== "string" || !readoutIds.has(e.readout) || !Number.isFinite(value)) continue;
+      const tol = typeof e.tol === "number" && e.tol >= 0 && e.tol <= 1 ? e.tol : undefined;
+      expect.push({ beat, readout: e.readout, value, ...(tol !== undefined ? { tol } : {}) });
+    }
+    if (expect.length) spec.expect = expect;
+    else delete spec.expect;
+    return { spec, errors };
+  }
+
+  accept(spec: DemoSpec) {
+    this.accepted.set(spec.id, spec);
+    this.write();
+  }
+
+  specs(): DemoSpec[] {
+    return [...this.accepted.values()].sort((a, b) => this.order.get(a.beats[0].anchor)! - this.order.get(b.beats[0].anchor)!);
+  }
+
+  write() {
+    writeJson(this.out, { book: this.book.slug, unit: this.unitId, demos: this.specs() });
+  }
+
+  /** Final plan (throws when nothing usable was produced). */
+  finish(): DemoPlan {
+    const demos = this.specs();
+    if (!demos.length) throw new Error(`plan ${tag(this.book.slug, this.unitId)}: no usable demos`);
+    this.write();
+    return { book: this.book.slug, unit: this.unitId, demos };
+  }
+}
