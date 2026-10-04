@@ -288,6 +288,8 @@ export function Reader({ unit, markers, active, zoom, fit, flashKey, bottomInset
                   <div className="page-clip">
                     <img
                       src={assetUrl(p.src)}
+                      srcSet={p.srcset?.map((v) => `${assetUrl(v.src)} ${v.w}w`).join(", ")}
+                      sizes={`${Math.round(g.fw)}px`}
                       alt={`Page ${p.label}`}
                       loading="lazy"
                       decoding="async"

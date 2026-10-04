@@ -2,20 +2,23 @@
 //
 // Each page is cut to its crop box (chosen by the anchors adapter so pages line
 // up when stacked), recoloured for the dark reader and saved as webp at ~2x the
-// CSS display size. Anchor boxes are normalised to the cropped page.
+// CSS display size, with 3x/4x variants for zoom and high-DPI screens. Anchor
+// boxes are normalised to the cropped page.
 //
 // Recolouring (BookConfig.recolor):
 //   "invert"    — greyscale scans: paper → #0a0a0a, ink → #ededed; dense photos keep their tones.
 //   "lightness" — born-digital colour pages: lightness is inverted in OKLab while hue and
 //                 chroma are kept, so coloured figure boxes stay recognisable on dark.
 
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 import sharp from "sharp";
 import type { Anchor, BookConfig, Library, PageImage, Unit } from "../../src/types";
-import { listBooks, pagePng, publicBookDir, rawUnitPath, unitJsonPath } from "../books";
+import { listBooks, pageFile, pagePng, publicBookDir, rawUnitPath, unitJsonPath, workDir } from "../books";
 import { pool } from "../lib/claude";
-import type { RawPage, RawUnit } from "./raw";
+import { DPI, type RawPage, type RawUnit } from "./raw";
 import { info } from "../lib/report";
 
 /**
@@ -161,22 +164,42 @@ function recolourLightness(rgb: Buffer, channels: number, w: number, h: number):
 
 // --- pages ---------------------------------------------------------------------
 
-async function renderPage(book: BookConfig, page: RawPage, out: string): Promise<{ width: number; height: number }> {
-  const { crop } = page;
-  const EXT = 600; // paper margin so crops may extend past the render edge
+/**
+ * Hi-res source for born-digital pages: a 600 dpi render (twice the anchors'
+ * 300 dpi), so the 3x/4x variants are real detail rather than upscaling.
+ */
+const HI_DPI = 600;
+const run = promisify(execFile);
+
+async function hiResPng(book: BookConfig, pdfPage: number): Promise<string> {
+  const dir = workDir(book.slug, "pages-hi");
+  const file = path.join(dir, `${pageFile(pdfPage)}.png`);
+  if (fs.existsSync(file)) return file;
+  fs.mkdirSync(dir, { recursive: true });
+  const prefix = path.join(dir, `tmp-${pdfPage}`);
+  await run("pdftoppm", ["-f", String(pdfPage), "-l", String(pdfPage), "-r", String(HI_DPI), "-hide-annotations", "-png", "-singlefile", book.source.pdf, prefix]);
+  fs.renameSync(`${prefix}.png`, file);
+  return file;
+}
+
+/**
+ * Cut the page's crop box out of `png` (rendered at `k` × the anchors' DPI),
+ * resize to `width` px, recolour and save as webp.
+ */
+async function renderVariant(book: BookConfig, page: RawPage, png: string, k: number, width: number, out: string): Promise<{ width: number; height: number }> {
+  const c = page.crop;
+  const EXT = 600 * k; // paper margin so crops may extend past the render edge
   const grey = book.recolor === "invert";
-  let img = sharp(pagePng(book.slug, page.pdfPage));
+  let img = sharp(png, { limitInputPixels: false });
   if (grey) img = img.greyscale();
   const padded = await img
     .removeAlpha()
     .extend({ top: EXT, bottom: EXT, left: EXT, right: EXT, background: "#ffffff" })
     .toBuffer();
-  const scale = book.source.kind === "text" ? Math.min(1, TEXT_PAGE_PX / crop.width) : scanScale;
-  const w = Math.round(crop.width * scale);
-  const h = Math.round(crop.height * scale);
-  const { data, info } = await sharp(padded)
-    .extract({ left: crop.left + EXT, top: crop.top + EXT, width: crop.width, height: crop.height })
-    .resize({ width: w, height: h, kernel: "lanczos3" })
+  const height = Math.round((width * c.height) / c.width);
+  const { data, info } = await sharp(padded, { limitInputPixels: false })
+    .extract({ left: Math.round(c.left * k) + EXT, top: Math.round(c.top * k) + EXT, width: Math.round(c.width * k), height: Math.round(c.height * k) })
+    .resize({ width, height, kernel: "lanczos3" })
     .raw()
     .toBuffer({ resolveWithObject: true });
   if (grey) {
@@ -193,19 +216,42 @@ async function renderPage(book: BookConfig, page: RawPage, out: string): Promise
   return { width: info.width, height: info.height };
 }
 
+/**
+ * The page at ~2x its CSS width (`<label>.webp`), plus sharper variants for
+ * zoom and high-DPI screens: 3x and 4x for born-digital pages (from a 600 dpi
+ * render), 3x for scans (their full resolution; more would only upscale).
+ */
+async function renderPage(book: BookConfig, page: RawPage, dir: string, url: string): Promise<{ base: { width: number; height: number }; srcset: { src: string; w: number }[] }> {
+  const text = book.source.kind === "text";
+  const baseW = Math.round(page.crop.width * (text ? Math.min(1, TEXT_PAGE_PX / page.crop.width) : scanScale));
+  const base = await renderVariant(book, page, pagePng(book.slug, page.pdfPage), 1, baseW, path.join(dir, `${page.label}.webp`));
+  const srcset = [{ src: `${url}/${page.label}.webp`, w: base.width }];
+  const extra: [string, number][] = text ? [["3x", 1.5], ["4x", 2]] : [["3x", 1.5]];
+  const hi = text ? await hiResPng(book, page.pdfPage) : pagePng(book.slug, page.pdfPage);
+  const k = text ? HI_DPI / DPI : 1;
+  for (const [name, f] of extra) {
+    const w = Math.round(base.width * f);
+    if (w > page.crop.width * k + 2) continue; // never upscale past the source (± rounding)
+    const v = await renderVariant(book, page, hi, k, w, path.join(dir, `${page.label}@${name}.webp`));
+    srcset.push({ src: `${url}/${page.label}@${name}.webp`, w: v.width });
+  }
+  return { base, srcset };
+}
+
 export async function assembleUnit(book: BookConfig, unitId: string): Promise<void> {
   const raw: RawUnit = JSON.parse(fs.readFileSync(rawUnitPath(book.slug, unitId), "utf8"));
   const pageDir = publicBookDir(book.slug, "pages", unitId);
   fs.mkdirSync(pageDir, { recursive: true });
 
+  const url = `books/${book.slug}/pages/${unitId}`;
   const pages: PageImage[] = await pool(raw.pages, 4, async (p) => {
-    const file = path.join(pageDir, `${p.label}.webp`);
-    const size = await renderPage(book, p, file);
+    const { base, srcset } = await renderPage(book, p, pageDir, url);
     return {
       label: p.label,
-      src: `books/${book.slug}/pages/${unitId}/${p.label}.webp`,
-      width: Math.round(size.width / 2),
-      height: Math.round(size.height / 2),
+      src: `${url}/${p.label}.webp`,
+      width: Math.round(base.width / 2),
+      height: Math.round(base.height / 2),
+      ...(srcset.length > 1 ? { srcset } : {}),
     };
   });
 

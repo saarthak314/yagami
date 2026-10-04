@@ -73,9 +73,11 @@ export interface PageImage {
   label: PageLabel;
   /** Path under public/, e.g. "books/attention/pages/paper/4.webp". */
   src: string;
-  /** Natural display size in CSS px at 1x (the image itself is ~2x for retina). */
+  /** Natural display size in CSS px at 1x (the image at `src` is ~2x for retina). */
   width: number;
   height: number;
+  /** Sharper variants for zoom / high-DPI screens (`src` included), widest last. */
+  srcset?: { src: string; w: number }[];
 }
 
 export interface Anchor {
