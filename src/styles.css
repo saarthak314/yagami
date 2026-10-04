@@ -590,23 +590,28 @@ kbd {
   right: 0;
   top: 36px;
   z-index: 50;
-  width: 288px;
-  padding: 12px;
+  width: 200px;
+  padding: 10px 12px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: 8px;
 }
 
+.popover:focus {
+  outline: none;
+}
+
 .popover dl {
   margin: 0;
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .popover dl > div {
-  display: grid;
-  grid-template-columns: 72px 1fr;
-  align-items: center;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .popover dt,
@@ -614,22 +619,17 @@ kbd {
   margin: 0;
 }
 
-.popover dd {
+.popover dt {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 
-.popover-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-  font-size: 13px;
-  color: var(--muted);
+.popover kbd {
+  padding: 0;
+  border: 0;
+  white-space: pre;
 }
+
 
 /* ------------------------------------------------------------------ palette */
 

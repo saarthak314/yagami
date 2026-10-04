@@ -36,7 +36,7 @@ the chapters to build; run it again later to add more. Re-running only redoes wh
 
 `<demo>` is any part of a demo's title, e.g. `yagami fix "closed path" "the triangle readouts stay at zero"`.
 
-In the reader: `j`/`k` step through demos, `space` plays/pauses, `h` holds the current demo, `?` lists shortcuts. The
+In the reader: `j`/`k` step through demos, `space` plays/pauses, `h` holds the current demo, `?` lists the shortcuts. The
 theme button in the header switches between yagami dark/light, gruvbox dark/light and catppuccin mocha/latte, which
 recolours the pages, demos and code listings.
 

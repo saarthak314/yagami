@@ -3,18 +3,15 @@
 import { useEffect, useRef } from "react";
 
 const SHORTCUTS: [string, string][] = [
-  ["j / k", "Next / previous step"],
-  ["Space", "Play / pause"],
-  ["r", "Restart demo"],
-  ["h", "Pin demo while scrolling"],
-  ["◎", "Show the step's paragraph"],
-  ["f", "Focus on the demo"],
-  ["d", "Show / hide demos"],
-  ["t", "Contents"],
-  ["+ / −", "Zoom pages (0 to fit)"],
-  ["⌘K  /", "Search"],
-  ["Esc", "Close / leave focus"],
-  ["?", "This panel"],
+  ["next / previous step", "j  k"],
+  ["play / pause", "space"],
+  ["restart", "r"],
+  ["pin demo", "h"],
+  ["focus demo", "f"],
+  ["hide demos", "d"],
+  ["contents", "t"],
+  ["zoom", "+  −"],
+  ["search", "⌘k"],
 ];
 
 export function HelpButton({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
@@ -51,12 +48,12 @@ export function HelpButton({ open, onOpenChange }: { open: boolean; onOpenChange
       {open && (
         <div className="popover" role="dialog" aria-label="Keyboard shortcuts" tabIndex={-1} ref={panel}>
           <dl>
-            {SHORTCUTS.map(([k, v]) => (
-              <div key={k}>
-                <dt>
-                  <kbd>{k}</kbd>
-                </dt>
-                <dd>{v}</dd>
+            {SHORTCUTS.map(([what, key]) => (
+              <div key={what}>
+                <dt>{what}</dt>
+                <dd>
+                  <kbd>{key}</kbd>
+                </dd>
               </div>
             ))}
           </dl>
