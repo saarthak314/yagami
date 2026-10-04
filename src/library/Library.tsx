@@ -66,6 +66,20 @@ function Continue({ library }: { library: Library }) {
   );
 }
 
+const REPO = "https://github.com/saarthak314/yagami";
+
+function SiteFooter() {
+  return (
+    <footer className="site-footer">
+      <span>© {new Date().getFullYear()} Sarthak Tomar</span>
+      <a href={REPO} target="_blank" rel="noreferrer">
+        Source
+      </a>
+      <span className="site-footer-note">Books and papers belong to their authors and publishers.</span>
+    </footer>
+  );
+}
+
 function AddHint({ label = "Add a book" }: { label?: string }) {
   const cmd = "yagami <file.pdf>";
   const [copied, setCopied] = useState(false);
@@ -102,7 +116,7 @@ export function LibraryView({ library, notFound }: { library: Library; notFound?
 
   if (books.length === 0) {
     return (
-      <main className="library">
+      <main className="library library-empty">
         <div className="empty">
           <div className="empty-brand">
             <Mark size={24} />
@@ -111,6 +125,7 @@ export function LibraryView({ library, notFound }: { library: Library; notFound?
           <p>Your library is empty. Turn a paper or textbook into a book with</p>
           <AddHint label="" />
         </div>
+        <SiteFooter />
       </main>
     );
   }
@@ -167,6 +182,7 @@ export function LibraryView({ library, notFound }: { library: Library; notFound?
         </ul>
 
         <AddHint />
+        <SiteFooter />
       </div>
     </main>
   );
