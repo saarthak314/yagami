@@ -13,6 +13,7 @@ export const DEMO_RULES = `Robustness rules (the demo is stress-tested: every be
 - Every array index, division, sqrt, log and pow on values that depend on params or time must be safe at every control's min and max: guard with safeDiv(a, b), finite(v), clamp(v, lo, hi); a slider at 0 or 1 is a normal state, not an edge case.
 - Initialise simulation state for every preset and every control value (useSim with [resetKey, preset, …params that change the setup]); never assume a previous preset's state.
 - Animations loop (or hold, then restart) forever; a stage that animates must keep animating after any time, restart or control change.
+- Step-throughs and processes reach the state the caption describes within ~12 s at default settings (pace the steps), then hold that end state for several seconds before replaying; the reader and the checks must be able to see the end state.
 - Publish every readout id on every frame via setReadouts, with finite values (format with fmt()); never NaN, Infinity, "undefined" or "null". Use "—" only when a readout truly doesn't apply in the current preset.
 - Keep every label inside the stage (≥ 16 px margin) and never let two labels overlap; put legends in their own row outside the plot area; size fonts and layout from width/height so it works from 480×300 to 1200×900.
 - Deterministic: no Math.random, Date or performance.now; seed randomness with rng(seed); animate only from Stage's onFrame (t, dt).

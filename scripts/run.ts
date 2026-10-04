@@ -23,7 +23,7 @@ import { buildDemo, buildEffort, generateDemo, loadConvo, reviseDemo, warmBuilde
 import { cleanStaleCandidates, cleanupRaces, raceDemo, raceEnabled, raceIdle } from "./demos/race";
 import { legacyPlanner, type OutlineDemo, PlanAssembler, PLAN_KEY_PREFIX, planInputHash, planOutline, planUnit, useDirect } from "./demos/plan";
 import { planDirect, warmDirect } from "./demos/direct";
-import { type CheckedOpts, closeEnv, type DemoResult, previousVerdict, startEnv, type VerifyEnv, verifyDemoChecked, writeReport } from "./demos/verify";
+import { type CheckedOpts, closeEnv, type DemoResult, previousVerdict, setFlag, startEnv, type VerifyEnv, verifyDemoChecked, writeReport } from "./demos/verify";
 import { fixEffort } from "./lib/claude";
 import { generateTemplateDemo, reviseTemplate, skipsReview, templateArtifact, warmTemplates } from "./demos/template";
 
@@ -388,7 +388,8 @@ async function demoTask(book: BookConfig, unit: string, spec: DemoSpec, steps: S
       if (!upToDate && raceEnabled() && !opts.note) {
         // Quick and careful drafts race; the first to pass the checks (+ review) is installed.
         const race = await raceDemo(loadCtx(book, unit), { kind: "spec", spec }, getEnv, { verify: steps.has("verify"), review: true });
-        const final = race.spec ?? spec;
+        // A demo that passed the race is no longer flagged by an earlier failed run.
+        const final = race.passed && steps.has("verify") ? setFlag(slug, unit, race.spec ?? spec, undefined) : (race.spec ?? spec);
         updateCache(slug, unit, (c) => void (c.demos[spec.id] = { spec: hash(JSON.stringify(final)), code: fileHash(file), verified: race.passed && steps.has("verify") }));
         if (!race.built) {
           emit({ type: "demo", unit, id: spec.id, phase: "fail", detail: race.why ?? "does not typecheck" });
@@ -479,7 +480,7 @@ async function generatedTask(
         emit({ type: "demo", unit, id: o.id, phase: "fail", detail: race.why });
         return { id: o.id, ok: false, why: race.why ?? "no usable spec" };
       }
-      const spec = race.spec;
+      const spec = race.passed && steps.has("verify") ? setFlag(slug, unit, race.spec, undefined) : race.spec;
       const file = paths.component(slug, unit, spec.component);
       updateCache(slug, unit, (cc) => void (cc.demos[spec.id] = { spec: hash(JSON.stringify(spec)), code: fileHash(file), verified: race.passed && steps.has("verify") }));
       if (!race.built) {
@@ -563,8 +564,8 @@ async function templateTask(book: BookConfig, unit: string, spec: DemoSpec, step
 }
 
 /**
- * Verify a template demo: deterministic checks; their notes (and a review's) become config-fix
- * turns. No model review when every reader-checkable value is pinned by \`expect\`.
+ * Verify a template demo: deterministic checks, then a contact-sheet review of every version that
+ * passes them; their notes (and a review's) become config-fix turns.
  */
 async function verifyTemplate(
   book: BookConfig,

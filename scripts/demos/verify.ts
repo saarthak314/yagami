@@ -17,7 +17,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { callJson, pool, roleModel } from "../lib/claude";
 import { Limit } from "../lib/limit";
 import { emit } from "../lib/report";
-import type { BookConfig, DemoSpec, Expectation } from "../../src/types";
+import type { BookConfig, DemoSpec, Expectation, ReadoutSpec } from "../../src/types";
 import { loadConvo, runConvo, saveSpec, toFixTurn } from "./build";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
 import { domainOf } from "./domains";
@@ -202,7 +202,29 @@ interface TextBox {
   rotated?: boolean;
 }
 
-/** One beat rendered for the checks: a single settled screenshot plus what the page reports. */
+/** Bounds of a filled/stroked shape on the stage (CSS px), from the kit's isolated-mode instrumentation. */
+export interface ShapeBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  kind: "fill" | "stroke";
+  closed?: boolean;
+}
+
+/** A later state of a beat: the demo run forward (deterministic frames) to about `t` seconds. */
+export interface LaterSample {
+  t: number;
+  readouts: Record<string, string>;
+  /** Full demo-pane screenshot at that time. */
+  shot: string;
+  /** Fraction of stage pixels that differ from the ~1 s frame. */
+  changedFrom1s: number;
+  text: TextBox[];
+  shapes: ShapeBox[];
+}
+
+/** One beat rendered for the checks: a settled screenshot at ~1 s, later samples, and what the page reports. */
 export interface CheckShot {
   beat: number;
   anchor: string;
@@ -219,6 +241,10 @@ export interface CheckShot {
   /** Text boxes ~0.4 s earlier: an overlap must be present in both samples (moving labels cross others briefly). */
   textBefore?: TextBox[];
   stage: { w: number; h: number } | null;
+  /** Shapes drawn in the ~1 s frame. */
+  shapes?: ShapeBox[];
+  /** The beat run on to ~6 s and ~16 s, so step-throughs show their later and final states. */
+  later?: LaterSample[];
 }
 
 export interface CheckResult {
@@ -236,6 +262,11 @@ export interface CheckResult {
 /** Settle time before the screenshot; the stage is sampled twice ~0.4 s apart to measure motion. */
 const SETTLE_MS = 1000;
 const MOTION_GAP_MS = 400;
+/**
+ * After the ~1 s frame each beat is run forward (deterministic 30 fps frames) and sampled again:
+ * step-throughs often reach their key state late, so checks and review see ~6 s and ~16 s too.
+ */
+const LATER_SAMPLES = [6, 16];
 
 /** Thresholds (tuned on the existing library; see work/qa/checks/report.json). */
 export const CHECK_LIMITS = {
@@ -251,6 +282,12 @@ export const CHECK_LIMITS = {
   overlapShare: 0.2,
   /** Default relative tolerance for expected values. */
   tol: 0.02,
+  /** A shape is cut off when it overhangs the stage edge by more than this (px)… */
+  shapeOverhang: 6,
+  /** …unless it spans most of the stage in that direction (background, ground or axis lines). */
+  shapeSpanShare: 0.8,
+  /** Stage pixels that may change between samples while still counting as "nothing changes". */
+  staticDiff: 0.0015,
 };
 
 async function inkFraction(png: Buffer): Promise<number> {
@@ -312,12 +349,41 @@ async function shootSettled(page: Page, env: VerifyEnv, c: Ctx, demo: DemoSpec, 
     .catch(() => ({ appErrors: [] as unknown[], text: [] as TextBox[], stage: null }));
   for (const e of info.appErrors) errors.push(`app: ${typeof e === "string" ? e : JSON.stringify(e)}`);
   // The shell shows non-finite readouts as "—" and marks them data-broken: report those as NaN.
-  const readouts = await page
-    .$$eval("[data-readout]", (els) =>
-      Object.fromEntries(els.map((el) => [el.getAttribute("data-readout") ?? "", el.getAttribute("data-broken") ? "NaN" : (el.textContent ?? "").trim()])),
-    )
-    .catch(() => ({}) as Record<string, string>);
-  return { beat, anchor: demo.beats[beat].anchor, ready, errors: [...new Set(errors)], readouts, changed, ink, shot, text: info.text, textBefore, stage: info.stage };
+  const readNow = () =>
+    page
+      .$$eval("[data-readout]", (els) =>
+        Object.fromEntries(els.map((el) => [el.getAttribute("data-readout") ?? "", el.getAttribute("data-broken") ? "NaN" : (el.textContent ?? "").trim()])),
+      )
+      .catch(() => ({}) as Record<string, string>);
+  const readouts = await readNow();
+  const shapes = await page.evaluate(() => (globalThis as unknown as { __stageShapes?: ShapeBox[] }).__stageShapes ?? []).catch(() => [] as ShapeBox[]);
+
+  // Run the beat on and sample its later states (step-throughs reach their key state late).
+  const later: LaterSample[] = [];
+  if (ready && hasStage) {
+    let at = SETTLE_MS / 1000;
+    for (const t of LATER_SAMPLES) {
+      try {
+        await page.evaluate((sec) => (globalThis as unknown as { __stageAdvance?: (s: number) => void }).__stageAdvance?.(sec), t - at);
+      } catch (e) {
+        errors.push(`runtime error while running on to t≈${t} s: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 160)}`);
+        break;
+      }
+      at = t;
+      await page.waitForTimeout(250); // the shell publishes readouts at 10 Hz
+      const st = await stage.screenshot().catch(() => null);
+      const file = path.join(outDir, `${demo.id}-${beat}-t${t}.png`);
+      await page.screenshot({ path: file });
+      const got = await page
+        .evaluate(() => {
+          const w = globalThis as unknown as { __stageText?: TextBox[]; __stageShapes?: ShapeBox[] };
+          return { text: w.__stageText ?? [], shapes: w.__stageShapes ?? [] };
+        })
+        .catch(() => ({ text: [] as TextBox[], shapes: [] as ShapeBox[] }));
+      later.push({ t, readouts: await readNow(), shot: file, changedFrom1s: s2 && st ? await stageDiff(s2, st) : 0, text: got.text, shapes: got.shapes });
+    }
+  }
+  return { beat, anchor: demo.beats[beat].anchor, ready, errors: [...new Set(errors)], readouts, changed, ink, shot, text: info.text, textBefore, stage: info.stage, shapes, later };
 }
 
 const SUPER: Record<string, string> = { "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "⁻": "-", "⁺": "+" };
@@ -380,6 +446,85 @@ function overlapsOf(text: TextBox[]): { a: string; b: string; x: number; y: numb
 
 const q = (s: string) => `"${s.length > 40 ? s.slice(0, 39) + "…" : s}"`;
 
+/** A readout label without $LaTeX$, commands or punctuation, lower-cased (for matching against captions). */
+const plainLabel = (s: string) =>
+  s
+    .replace(/\$[^$]*\$/g, " ")
+    .replace(/\\[a-z]+/gi, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+/**
+ * The valid range of a readout: its spec `range`, else one its label makes certain (a probability is in
+ * [0, 1]; an error rate, accuracy, utilization or fraction shown in % is in [0, 100]; a count is ≥ 0).
+ * Conservative: anything a label doesn't pin down has no implied range.
+ */
+export function readoutRange(r: ReadoutSpec, text: string): { range: [number, number]; implied: boolean } | null {
+  if (r.range && r.range.length === 2 && r.range.every((v) => typeof v === "number")) return { range: r.range, implied: false };
+  const l = plainLabel(`${r.label} ${r.id}`);
+  const raw = r.label.toLowerCase();
+  const pct = /%/.test(text);
+  if (/\b(probability|probabilities|likelihood|chance)\b/.test(l) || /(^|[^a-z\\])p\s*\(/.test(raw)) return { range: pct ? [0, 100] : [0, 1], implied: true };
+  if (pct && /\b(error|accuracy|utili[sz]ation|occupancy|fraction|share)\b/.test(l)) return { range: [0, 100], implied: true };
+  if (/\b(fraction|share)\b/.test(l)) return { range: pct ? [0, 100] : [0, 1], implied: true };
+  if (/^(number of|count)\b/.test(l) || /^#/.test(r.label.trim())) return { range: [0, Infinity], implied: true };
+  return null;
+}
+
+/** Captions that describe something happening over time (conservative: verbs of a process, not of the reader's actions). */
+const PROCESS =
+  /\b(one after another|one at a time|one by one|step by step|steps? through|stepping through|frame by frame|over time|as time (goes on|passes)|animat(es|ed|ing)|simulat(es|ed|ing)|travel(s|led|ling|ing)|propagat(es|ed|ing)|in turn)\b/i;
+/** Captions that tell the reader to change something: the stage then waits for the reader, legitimately static. */
+const READER_ACTION =
+  /(^|[.!?:;]\s+)(drag|change|choose|pick|set|move|slide|raise|lower|increase|decrease|toggle|switch|lengthen|shorten|turn|select|try|push|pull|click|press|vary|adjust|compare|step)\b/i;
+
+/**
+ * Readout texts that say "no value yet" in words (a state never reached). Not "—": a readout that
+ * doesn't apply to a beat shows that legitimately.
+ */
+const NULLISH = /^(none|not yet|nothing|pending|waiting|undecided|unknown)$/i;
+const STOPWORDS = new Set(["value", "values", "current", "total", "number", "count", "readout", "this", "that", "with", "from", "after", "each"]);
+
+/** Number words captions use for simple fractions. */
+const WORD_NUMS: [RegExp, number][] = [
+  [/^one half$|^a half$|^half$/i, 0.5],
+  [/^one third$|^a third$/i, 1 / 3],
+  [/^two thirds$/i, 2 / 3],
+  [/^one quarter$|^a quarter$|^one fourth$/i, 0.25],
+  [/^three quarters$|^three fourths$/i, 0.75],
+];
+const NUM_RE = String.raw`(-?\d+(?:\.\d+)?(?:\s*%)?|one half|a half|half|one third|a third|two thirds|one quarter|a quarter|one fourth|three quarters|three fourths)`;
+const wordNum = (t: string): number[] => {
+  for (const [re, v] of WORD_NUMS) if (re.test(t.trim())) return [v];
+  return numbersIn(t);
+};
+const escRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const near = (a: number, b: number) => Math.abs(a - b) <= Math.max(0.005, 0.05 * Math.abs(b));
+
+/** Shapes partly visible and cut off by a stage edge (not ones spanning the stage, like a ground line). */
+function clippedShapes(shapes: ShapeBox[], W: number, H: number): { side: string; cx: number; cy: number; desc: string }[] {
+  const m = CHECK_LIMITS.shapeOverhang;
+  const out: { side: string; cx: number; cy: number; desc: string }[] = [];
+  for (const b of shapes) {
+    // Filled or outlined shapes only (boxes, bars, discs): an open line running off the stage is usually deliberate.
+    if ((b.kind !== "fill" && !b.closed) || !(b.w >= 0 && b.h >= 0)) continue;
+    const visible = b.x < W && b.x + b.w > 0 && b.y < H && b.y + b.h > 0;
+    if (!visible) continue;
+    const cx = Math.round(b.x + b.w / 2);
+    const cy = Math.round(b.y + b.h / 2);
+    // A band across the stage (background, ground, a full-width panel) runs off it on purpose.
+    if (b.w > CHECK_LIMITS.shapeSpanShare * W || b.h > CHECK_LIMITS.shapeSpanShare * H) continue;
+    const span = `x ${Math.round(b.x)}–${Math.round(b.x + b.w)}, y ${Math.round(b.y)}–${Math.round(b.y + b.h)}`;
+    if (b.x < -m) out.push({ side: "left", cx, cy, desc: `the left edge (${span} on a ${W}×${H} stage)` });
+    else if (b.x + b.w > W + m) out.push({ side: "right", cx, cy, desc: `the right edge (${span} on a ${W}×${H} stage)` });
+    else if (b.y < -m) out.push({ side: "top", cx, cy, desc: `the top edge (${span} on a ${W}×${H} stage)` });
+    else if (b.y + b.h > H + m) out.push({ side: "bottom", cx, cy, desc: `the bottom edge (${span} on a ${W}×${H} stage)` });
+  }
+  return out;
+}
+
 /** Per-beat findings for one rendered beat (without the beat prefix, so equal findings group across beats). */
 export function findings(demo: DemoSpec, s: CheckShot, expect: Expectation[]): string[] {
   const out: string[] = [];
@@ -403,6 +548,85 @@ export function findings(demo: DemoSpec, s: CheckShot, expect: Expectation[]): s
     const nums = numbersIn(text);
     const tol = e.tol ?? CHECK_LIMITS.tol;
     if (!nums.some((n) => close(n, e.value, tol))) out.push(`readout ${label} shows ${q(text)}, the text gives ${e.value}${tol ? ` (±${Math.round(tol * 1000) / 10}%)` : " (exact)"}`);
+  }
+
+  // Readouts outside their valid range (spec `range`, else implied by the label), at any sampled time.
+  const samples: { t: string; readouts: Record<string, string> }[] = [{ t: "1 s", readouts: s.readouts }, ...(s.later ?? []).map((l) => ({ t: `${l.t} s`, readouts: l.readouts }))];
+  for (const r of demo.readouts) {
+    for (const smp of samples) {
+      const text = smp.readouts[r.id];
+      if (text === undefined || text === "—" || BROKEN.test(text)) continue;
+      const rr = readoutRange(r, text);
+      if (!rr) continue;
+      const nums = numbersIn(text);
+      const [lo, hi] = rr.range;
+      const eps = (v: number) => 1e-9 * Math.max(1, Math.abs(v));
+      if (nums.length && nums.every((n) => n < lo - eps(lo) || n > hi + eps(hi))) {
+        out.push(`readout ${q(r.label)} (${r.id}) shows ${q(text)} at ${smp.t}, outside its valid range [${lo}, ${hi === Infinity ? "∞" : hi}]${rr.implied ? " (implied by its label)" : ""}`);
+        break;
+      }
+    }
+  }
+
+  const caption = demo.beats[s.beat]?.caption ?? "";
+  const later = s.later ?? [];
+  // The caption describes a process, but neither the stage nor any readout changes over ~16 s.
+  const proc = PROCESS.exec(caption);
+  if (proc && !READER_ACTION.test(caption) && later.length === LATER_SAMPLES.length) {
+    const stageStatic = later.every((l) => l.changedFrom1s < CHECK_LIMITS.staticDiff) && s.changed < CHECK_LIMITS.staticDiff;
+    const readoutsStatic = demo.readouts.every((r) => later.every((l) => l.readouts[r.id] === s.readouts[r.id]));
+    if (stageStatic && readoutsStatic) out.push(`the caption describes a process (${q(proc[0])}) but neither the stage nor any readout changes over ~${LATER_SAMPLES[LATER_SAMPLES.length - 1]} s`);
+  }
+  // A readout that never shows a value while the caption talks about it ("… its value is chosen" / "chosen: none").
+  for (const r of demo.readouts) {
+    const vals = samples.map((smp) => smp.readouts[r.id]).filter((v): v is string => v !== undefined);
+    if (vals.length < samples.length || !vals.every((v) => NULLISH.test(v.trim()))) continue;
+    const keys = plainLabel(r.label)
+      .split(" ")
+      .filter((w) => w.length >= 4 && !STOPWORDS.has(w));
+    for (const k of keys) {
+      const m = new RegExp(`(?:^|\\W)((?:\\S+\\s+){0,3})${escRe(k)}\\w*`, "i").exec(caption);
+      if (!m) continue;
+      if (/\b(no|not|never|nothing|without|none|yet|until|before|unless)\b/i.test(m[1])) continue;
+      out.push(`readout ${q(r.label)} (${r.id}) shows ${q(vals[0])} at every sampled time (1–${LATER_SAMPLES[LATER_SAMPLES.length - 1]} s), but the caption speaks of it (${q(k)})`);
+      break;
+    }
+  }
+  // A caption that states a readout's value outright ("the sum readout stays at 1") must agree with it.
+  for (const r of demo.readouts) {
+    const label = plainLabel(r.label);
+    if (label.length < 3) continue;
+    const re = new RegExp(`\\b${label.split(" ").map(escRe).join("\\s+")}(?:\\s+readout)?\\s+(?:reads|shows|stays at|stays|settles (?:at|on|to)|reaches|equals|is|=|≈)\\s+(?:about\\s+|exactly\\s+|roughly\\s+)?${NUM_RE}`, "i");
+    const m = re.exec(caption);
+    if (!m) continue;
+    // Not "144 crops reaches …" (the label as a noun after a number), not "2πGμ" (a symbol, not a value).
+    if (/\d\s*$/.test(caption.slice(0, m.index))) continue;
+    const after = caption.slice(m.index + m[0].length);
+    if (/^(?:[\p{L}π\\^(_]|\.\d|\s*[×·*/^])/u.test(after)) continue;
+    // A percentage in the caption is only compared with a percentage readout.
+    if (/%/.test(m[1]) && !samples.some((smp) => /%/.test(smp.readouts[r.id] ?? ""))) continue;
+    const want = wordNum(m[1]);
+    if (!want.length) continue;
+    const got = samples.flatMap((smp) => (smp.readouts[r.id] === undefined ? [] : numbersIn(smp.readouts[r.id])));
+    if (got.length && !want.some((w) => got.some((g) => near(g, w)))) {
+      const shown = [...new Set(samples.map((smp) => smp.readouts[r.id]).filter(Boolean))].slice(0, 3).join(", ");
+      out.push(`the caption says ${q(r.label)} is ${m[1]}, but the readout shows ${q(shown)}`);
+    }
+  }
+
+  // Shapes cut off by the stage edge, in both the ~1 s frame and the last sample (layout, not motion).
+  if (s.stage && s.shapes && later.length) {
+    const lastShapes = later[later.length - 1].shapes;
+    const a = clippedShapes(s.shapes, s.stage.w, s.stage.h);
+    const b = clippedShapes(lastShapes, s.stage.w, s.stage.h);
+    const seen = new Set<string>();
+    for (const c of a) {
+      if (!b.some((d) => d.side === c.side && Math.hypot(d.cx - c.cx, d.cy - c.cy) < 20)) continue;
+      const key = `${c.side}:${Math.round(c.cx / 20)}:${Math.round(c.cy / 20)}`;
+      if (seen.has(key) || seen.size >= 3) continue;
+      seen.add(key);
+      out.push(`a drawn shape is cut off at ${c.desc}`);
+    }
   }
 
   // Labels: clipped at the stage edge, or overlapping each other.
@@ -433,29 +657,35 @@ function groupNotes(perBeat: { beat: number; notes: string[] }[]): string[] {
   return [...by.entries()].map(([n, beats]) => `${beats.length > 1 ? "beats" : "beat"} ${beats.join(",")}: ${n}`);
 }
 
-/** Tile the beat screenshots into one image (downscaled), each labelled with its beat. */
-async function contactSheet(shots: CheckShot[], file: string, scale = 0.5): Promise<string> {
-  const usable = shots.filter((s) => fs.existsSync(s.shot));
-  if (!usable.length) return "";
+/**
+ * Tile the beat screenshots into one image (downscaled): one row per beat, its frames at ~1 s and at
+ * each later sample left to right (a step-through only shows its key state late), each labelled.
+ */
+async function contactSheet(shots: CheckShot[], file: string, scale = 0.4): Promise<string> {
+  const rowsIn = shots
+    .filter((s) => fs.existsSync(s.shot))
+    .map((s) => [{ shot: s.shot, label: `beat ${s.beat} · ~1 s` }, ...(s.later ?? []).filter((l) => fs.existsSync(l.shot)).map((l) => ({ shot: l.shot, label: `beat ${s.beat} · ~${l.t} s` }))]);
+  if (!rowsIn.length) return "";
   const tw = Math.round(VIEWPORT.width * scale);
   const th = Math.round(VIEWPORT.height * scale);
-  const cols = Math.min(3, usable.length);
-  const rows = Math.ceil(usable.length / cols);
+  const cols = Math.max(...rowsIn.map((r) => r.length));
   const gap = 8;
   const label = 18;
   const tiles = await Promise.all(
-    usable.map(async (s, i) => {
-      const img = await sharp(s.shot).resize(tw, th, { fit: "contain", background: "#0a0a0a" }).png().toBuffer();
-      const cap = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${tw}" height="${label}"><text x="2" y="13" font-family="sans-serif" font-size="12" fill="#a1a1a1">beat ${s.beat}</text></svg>`);
-      const left = (i % cols) * (tw + gap);
-      const top = Math.floor(i / cols) * (th + label + gap);
-      return [
-        { input: cap, left, top },
-        { input: img, left, top: top + label },
-      ];
-    }),
+    rowsIn.flatMap((row, ri) =>
+      row.map(async (cell, ci) => {
+        const img = await sharp(cell.shot).resize(tw, th, { fit: "contain", background: "#0a0a0a" }).png().toBuffer();
+        const cap = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${tw}" height="${label}"><text x="2" y="13" font-family="sans-serif" font-size="12" fill="#a1a1a1">${cell.label}</text></svg>`);
+        const left = ci * (tw + gap);
+        const top = ri * (th + label + gap);
+        return [
+          { input: cap, left, top },
+          { input: img, left, top: top + label },
+        ];
+      }),
+    ),
   );
-  await sharp({ create: { width: cols * tw + (cols - 1) * gap, height: rows * (th + label) + (rows - 1) * gap, channels: 3, background: "#000000" } })
+  await sharp({ create: { width: cols * tw + (cols - 1) * gap, height: rowsIn.length * (th + label) + (rowsIn.length - 1) * gap, channels: 3, background: "#000000" } })
     .composite(tiles.flat())
     .png()
     .toFile(file);
@@ -629,28 +859,34 @@ export async function verifyDemo(env: VerifyEnv, c: Ctx, demo: DemoSpec, rounds:
   }
   const passed = results.filter((r) => r.pass).length;
   const pass = results.length > 0 && passed === results.length;
+  let latest = demo; // fix turns may have saved a corrected spec
+  try {
+    latest = loadPlan(slug, unit).demos.find((d) => d.id === demo.id) ?? demo;
+  } catch {}
+  setFlag(slug, unit, latest, pass ? undefined : flagReason(results));
   emit({ type: "demo", unit, id: demo.id, phase: pass ? "pass" : "fail", round, beatsPassed: passed, beats: results.length, detail: pass ? undefined : results.find((r) => !r.pass)?.issues[0] });
   return { id: demo.id, component: demo.component, rounds: round, pass, beats: results };
 }
 
 // --- Contact-sheet review + the checked verify loop --------------------------------
 //
-// The deterministic checks run first; only a demo that passes them is shown to the
-// model, once, as a single contact sheet of all beats. At most one revision round is
-// spent on the review's findings.
+// The deterministic checks run first; a demo that passes them is shown to the model as a
+// single contact sheet of all beats. Every version that passes the checks is reviewed —
+// including one produced by a fix round — and a demo still failing after all rounds is
+// flagged in its spec (the reader says so) with the best version kept.
 
 const SheetReviewSchema = z.object({ pass: z.boolean(), issues: z.array(z.string()) });
 
 function sheetSystem(book: BookConfig): string {
   const d = domainOf(book.domain);
-  return `You review ${d.demoNoun}s that accompany "${book.title}". You get ONE contact sheet: every beat of a demo rendered once after ~1 s (caption, stage, controls and readouts), plus each beat's caption, the anchored paragraph and the readout values as text, and the demo brief.
+  return `You review ${d.demoNoun}s that accompany "${book.title}". You get ONE contact sheet: one row per beat, each rendered after ~1 s, ~${LATER_SAMPLES.join(" s and ~")} s of running (caption, stage, controls and readouts), plus each beat's caption, the anchored paragraph and the readout values as text, and the demo brief.
 
 Layout and numbers were already checked by a script: no runtime errors, no blank stage, no clipped or overlapping labels, readouts present and the values the text pins down are correct. Do not re-check those. Judge only what needs understanding:
 - does each beat's stage show what its caption and paragraph describe (the right objects, the right behaviour, the right trend when a control changes between beats)?
 ${d.reviewChecks}
 - would a reader be misled by the picture?
 
-The images are small; do not fail for legibility or taste. Mid-animation values are partial. Default to pass; fail only when ${d.reviewer} would agree the demo is wrong or misleading. Issues (at most 4) must say which beat, what is wrong and what it should be. Reply as JSON { "pass": boolean, "issues": string[] }.`;
+The images are small; do not fail for legibility or taste. Mid-animation values are partial; a step-through may reach its key state only in the later frames, so judge the end state there — and fail a beat whose caption describes something the frames never show. Check that numbers the caption states match the readouts. Default to pass; fail only when ${d.reviewer} would agree the demo is wrong or misleading. Issues (at most 4) must say which beat, what is wrong and what it should be. Reply as JSON { "pass": boolean, "issues": string[] }.`;
 }
 
 /** One model review of a demo that passed the deterministic checks (one contact-sheet image). */
@@ -662,10 +898,10 @@ export async function reviewSheet(c: Ctx, demo: DemoSpec, check: CheckResult): P
     const b = demo.beats[s.beat];
     content.push({
       type: "text",
-      text: `\n## Beat ${s.beat}\nPreset: ${b.preset}${b.params ? `, params ${JSON.stringify(b.params)}` : ""}\nCaption: ${b.caption}\nParagraph (${textSourceNote(c.book).name}):\n${anchorContext(c, b.anchor, 0, 0)}\nReadouts: ${JSON.stringify(s.readouts)}\nStage motion over 0.4 s: ${(s.changed * 100).toFixed(1)}% of pixels`,
+      text: `\n## Beat ${s.beat}\nPreset: ${b.preset}${b.params ? `, params ${JSON.stringify(b.params)}` : ""}\nCaption: ${b.caption}\nParagraph (${textSourceNote(c.book).name}):\n${anchorContext(c, b.anchor, 0, 0)}\nReadouts at ~1 s: ${JSON.stringify(s.readouts)}${(s.later ?? []).map((l) => `\nReadouts at ~${l.t} s: ${JSON.stringify(l.readouts)}`).join("")}\nStage motion over 0.4 s: ${(s.changed * 100).toFixed(1)}% of pixels${(s.later ?? []).map((l) => `; ~${l.t} s frame differs from ~1 s by ${(l.changedFrom1s * 100).toFixed(1)}%`).join("")}`,
     });
   }
-  if (check.sheet && fs.existsSync(check.sheet)) content.push({ type: "text", text: "Contact sheet (beats left to right, top to bottom):" }, pngBlock(fs.readFileSync(check.sheet)));
+  if (check.sheet && fs.existsSync(check.sheet)) content.push({ type: "text", text: "Contact sheet (one row per beat; ~1 s, then the later frames, left to right):" }, pngBlock(fs.readFileSync(check.sheet)));
   content.push({ type: "text", text: "Review the demo. Reply as JSON." });
   const { data } = await callJson(SheetReviewSchema, {
     ...roleModel("review"),
@@ -703,9 +939,10 @@ export function toResults(check: CheckResult, pass: boolean, issues: string[]): 
 }
 
 /**
- * Checked verify loop: deterministic checks (free) until they pass or `rounds` fix
- * rounds are spent; then one contact-sheet model review (`review: false` skips it)
- * with at most one revision round on its findings. Same result shape as verifyDemo.
+ * Checked verify loop: deterministic checks (free) until they pass or `rounds` fix rounds are spent;
+ * every version that passes them gets one contact-sheet model review (`review: false` skips it), and a
+ * failed review spends a fix round too. A demo still failing at the end keeps its best version and is
+ * flagged (`spec.flagged`). Same result shape as verifyDemo.
  */
 /** A deterministic note about an expected readout value (grouped form: "beat(s) …: readout … shows …, the text gives …"). */
 function isExpectNote(n: string): boolean {
@@ -740,6 +977,26 @@ export interface CheckedOpts {
   fix?: (notes: string[], check: CheckResult, from: "checks" | "review", round: number) => Promise<DemoSpec | null>;
 }
 
+/**
+ * Set or clear a demo's `flagged` note in its plan (one line). Returns the spec as saved; no write when
+ * nothing changes.
+ */
+export function setFlag(slug: string, unit: string, demo: DemoSpec, reason: string | undefined): DemoSpec {
+  const line = reason?.replace(/\s+/g, " ").trim();
+  const flagged = line ? (line.length > 200 ? line.slice(0, 199) + "…" : line) : undefined;
+  if (demo.flagged === flagged) return demo;
+  const next: DemoSpec = { ...demo };
+  if (flagged) next.flagged = flagged;
+  else delete next.flagged;
+  saveSpec(slug, unit, next);
+  return next;
+}
+
+/** The first failing issue of a result, for `flagged`. */
+function flagReason(results: BeatResult[]): string {
+  return results.find((r) => !r.pass)?.issues[0] ?? "did not pass verification";
+}
+
 export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, opts: CheckedOpts = {}): Promise<DemoResult> {
   const rounds = opts.rounds ?? 2;
   const slug = c.book.slug;
@@ -747,12 +1004,26 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
   const t = tag(slug, unit);
   const outDir = paths.verifyDir(slug, unit);
   const file = paths.component(slug, unit, demo.component);
+  const codeNow = () => (opts.fix ? null : fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null);
+  /** What a review judged: the spec (a template's config lives there) and the component code. */
+  const versionKey = (d: DemoSpec) => {
+    const { flagged: _f, ...rest } = d;
+    return JSON.stringify(rest) + "\n" + (codeNow() ?? "");
+  };
+  const reviews = new Map<string, { pass: boolean; issues: string[] }>();
   let round = 0;
   let results: BeatResult[] = [];
-  let reviewed = false;
+  let lastScore = -1;
+  /** Best version seen (review pass > checks pass > fewer check notes), restored if the demo ends failing. */
+  let best: { demo: DemoSpec; code: string | null; results: BeatResult[]; score: number } | null = null;
+  const consider = (score: number) => {
+    lastScore = score;
+    if (!best || score > best.score) best = { demo, code: codeNow(), results, score };
+  };
   const warnings: string[] = [];
   /** Expectations were dropped on the last round: the model review decides instead. */
   let dropped = false;
+  let pass = false;
   try {
     for (; ; round++) {
       emit({ type: "demo", unit, id: demo.id, phase: "verifying", round, beats: demo.beats.length });
@@ -776,6 +1047,7 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
       if (!check.ok) {
         log(`verify ${t} ${demo.id}: round ${round}: ${check.notes.length} check notes`);
         results = toResults(check, false, check.notes);
+        consider(1 - Math.min(check.notes.length, 999) / 1000);
         if (opts.fix) {
           const next = round < rounds ? await opts.fix(check.notes, check, "checks", round + 1) : null;
           if (!next) break;
@@ -789,37 +1061,55 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
         demo = convo.spec; // a fix turn may have corrected the spec's expectations
         continue;
       }
-      if ((opts.review === false && !dropped) || reviewed) {
+      if (opts.review === false && !dropped) {
         results = toResults(check, true, []);
+        pass = true;
         break;
       }
-      const r = given?.review ?? (await reviewSheet(c, demo, check));
-      reviewed = true;
+      // Every version that passes the checks is reviewed — a fix that only satisfies the checker
+      // must not ship unreviewed. The same version is never reviewed twice.
+      const key = versionKey(demo);
+      const r = reviews.get(key) ?? given?.review ?? (await reviewSheet(c, demo, check));
+      reviews.set(key, r);
       log(`verify ${t} ${demo.id}: round ${round}: checks pass, review ${r.pass ? "pass" : `fail (${r.issues.length})`}`);
       results = toResults(check, r.pass, r.issues);
-      if (r.pass) break;
+      consider(r.pass ? 3 : 2);
+      if (r.pass) {
+        pass = true;
+        break;
+      }
       if (opts.fix) {
         const next = round < rounds ? await opts.fix(r.issues, check, "review", round + 1) : null;
-        if (!next || JSON.stringify(next) === JSON.stringify(demo)) break;
+        if (!next || versionKey(next) === key) break;
         demo = next;
         continue;
       }
       const convo = round < rounds ? loadConvo(slug, unit, demo.id) : null;
       if (!convo) break;
-      // One revision on the review's findings; the next round re-checks deterministically, and a
-      // version that passes the checks after this revision is accepted without a second review.
-      const before = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
+      // A revision on the review's findings; the next round re-checks it and, if it passes, reviews it again.
       toFixTurn(convo, checkFeedback(r.issues, check, "review").content as Anthropic.Beta.BetaContentBlockParam[]);
       await runConvo(convo, 3, "revising", round + 1);
       demo = convo.spec;
-      if (before !== null && fs.existsSync(file) && fs.readFileSync(file, "utf8") === before) break;
+      if (versionKey(demo) === key) break;
     }
   } catch (e) {
     log(`verify ${t} ${demo.id}: error ${(e as Error).message}`);
     if (!results.length) results = demo.beats.map((b, i) => ({ beat: i, anchor: b.anchor, ready: false, errors: [(e as Error).message], readouts: {}, changed: 0, shots: ["", ""] as [string, string], pass: false, issues: [(e as Error).message] }));
   }
+  pass = pass && results.length > 0 && results.every((r) => r.pass);
+  const kept = best as { demo: DemoSpec; code: string | null; results: BeatResult[]; score: number } | null;
+  if (!pass && kept && kept.score > lastScore) {
+    // A fix round made it worse: keep the best version seen.
+    log(`verify ${t} ${demo.id}: restoring the best version seen`);
+    if (kept.code !== null) fs.writeFileSync(file, kept.code);
+    demo = kept.demo;
+    saveSpec(slug, unit, demo);
+    results = kept.results;
+  }
+  // Never ship a failing demo silently: the reader shows the flag; a passing demo clears it.
+  demo = setFlag(slug, unit, demo, pass ? undefined : flagReason(results));
+  if (!pass) log(`verify ${t} ${demo.id}: flagged: ${demo.flagged}`);
   const passed = results.filter((r) => r.pass).length;
-  const pass = results.length > 0 && passed === results.length;
   emit({ type: "demo", unit, id: demo.id, phase: pass ? "pass" : "fail", round, beatsPassed: passed, beats: results.length, detail: pass ? undefined : results.find((r) => !r.pass)?.issues[0] });
   return { id: demo.id, component: demo.component, rounds: round, pass, beats: results, ...(warnings.length ? { warnings } : {}) };
 }

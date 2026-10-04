@@ -156,6 +156,11 @@ export interface ReadoutSpec {
   id: string;
   /** Short label, may contain $LaTeX$, e.g. "$T + U$". */
   label: string;
+  /**
+   * Physically/mathematically valid range of the readout's value (e.g. an error rate ≥ 0, a
+   * probability in [0, 1]). The checks fail a readout that shows a value outside it.
+   */
+  range?: [number, number];
 }
 
 export interface Preset {
@@ -197,6 +202,11 @@ export interface DemoSpec {
   template?: string;
   /** The template's config, validated by the catalog entry's `validate`. */
   config?: unknown;
+  /**
+   * Set by verify when the demo still fails after all rounds: a one-line reason. The reader shows a
+   * quiet "may be inaccurate" note with it — a failing demo is never shipped silently.
+   */
+  flagged?: string;
 }
 
 /** A readout value the demo must show at a beat (verified deterministically after the stage settles). */

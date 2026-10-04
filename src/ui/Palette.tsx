@@ -102,7 +102,15 @@ export function Palette({
                 <span className="palette-title">
                   <Inline md={r.title} />
                 </span>
-                <span className="palette-context">{r.context}</span>
+                <span className="palette-context">
+                  {r.context}
+                  {r.flagged && (
+                    <span className="palette-flag" title={`may be inaccurate: ${r.flagged}`}>
+                      {" "}
+                      · may be inaccurate
+                    </span>
+                  )}
+                </span>
               </span>
             </li>
           ))}

@@ -2,10 +2,11 @@
 // the active beat. Parameter merge order: preset → beat ("text values") → user edits.
 
 import { Component, Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
-import type { ControlSpec, DemoProps, Params, ParamValue } from "../types";
+import type { ControlSpec, DemoProps, Params, ParamValue, Preset } from "../types";
 import { loaderFor, type BeatRef } from "../lib/data";
 import { templateComponent } from "./templates";
 import { Inline } from "../lib/inline";
+import { formatReadout } from "../lib/format";
 import { ChevronLeft, ChevronRight, Collapse, Expand, Locate, Pin } from "../ui/icons";
 
 /** Narrowest width a demo is laid out at (wider than the phone sheet and the smallest pane). */
@@ -151,6 +152,7 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
   const scale = size.w > 0 && size.w < STAGE_MIN ? size.w / STAGE_MIN : 1;
   const logical = { w: Math.round(size.w / scale), h: Math.round(size.h / scale) };
   const setParam = (id: string, v: ParamValue) => setEdits((e) => ({ ...e, [id]: v }));
+  const showSetup = demo.presets.length > 1 && !setupDuplicated(demo.presets, demo.controls);
 
   return (
     <section className="demo-pane">
@@ -160,6 +162,12 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
           <p className="demo-caption">
             <Inline md={subscriptsMd(beat.beat.caption)} />
           </p>
+          {/* Verify couldn't confirm this demo: say so, quietly. (Not in isolated mode — the checks' own view.) */}
+          {demo.flagged && !onReady && (
+            <p className="demo-flag" role="note">
+              this demo may be inaccurate: {demo.flagged}
+            </p>
+          )}
         </header>
         <div className="demo-stage" ref={stageRef}>
           {size.w > 0 && size.h > 0 && (
@@ -224,9 +232,9 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
           )}
         </div>
 
-        {(demo.presets.length > 1 || demo.controls.length > 0) && (
+        {(showSetup || demo.controls.length > 0) && (
           <div className="controls-grid">
-            {demo.presets.length > 1 && (
+            {showSetup && (
               <label className="control setup">
                 <span className="control-label">setup</span>
                 <select
@@ -354,7 +362,7 @@ export function DemoTitleRow({ beat, step, onShowInText, pinned, onTogglePin, fo
         <Inline md={beat.demo.title} />
       </h2>
       <span className="spacer" />
-      {step && step.total > 1 && <StepNav step={step} />}
+      {step && (step.onPrev || step.onNext) && <StepNav step={step} />}
       {onShowInText && (
         <button className="btn icon ghost" onClick={onShowInText} aria-label="Show in text" title="show this paragraph in the text">
           <Locate />
@@ -391,12 +399,28 @@ export function StepNav({ step }: { step: NonNullable<Props["step"]> }) {
   );
 }
 
+/**
+ * The setup picker is redundant when a select control already switches between exactly the presets: each
+ * preset sets that control to a different one of its options and they agree on every other parameter.
+ */
+function setupDuplicated(presets: Preset[], controls: ControlSpec[]): boolean {
+  return controls.some((c) => {
+    if (c.type !== "select") return false;
+    const values = presets.map((p) => String(p.params[c.id]));
+    if (new Set(values).size !== presets.length || !values.every((v) => c.options.some((o) => o.value === v))) return false;
+    const [first, ...rest] = presets;
+    const keys = new Set(presets.flatMap((p) => Object.keys(p.params)));
+    keys.delete(c.id);
+    return rest.every((p) => [...keys].every((k) => p.params[k] === first.params[k]));
+  });
+}
+
 /** A readout value; non-finite numbers show "—" to the reader but stay visible to the checks (data-broken). */
 function ReadoutValue({ id, value }: { id: string; value: string | number | undefined }) {
   const broken = typeof value === "number" && !Number.isFinite(value);
   return (
     <dd data-readout={id} data-broken={broken ? "1" : undefined}>
-      {value === undefined || broken ? "—" : value}
+      {value === undefined || broken ? "—" : formatReadout(value)}
     </dd>
   );
 }

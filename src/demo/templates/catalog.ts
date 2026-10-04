@@ -22,6 +22,10 @@ import {
   validateHeapAllocator,
   validateAttentionHeads,
   validateLayerStack,
+  validateMessageSequence,
+  validateHashChain,
+  validateStateMachine,
+  validateMarkovChain,
 } from "./configs";
 
 export interface TemplateInfo {
@@ -70,7 +74,7 @@ export function staticReadoutProblems(config: unknown, spec: DemoSpec, templateI
     .filter((r): r is { id: string; src: string; c: Compiled | number } => r !== null);
   const defs = isObj(config.defs) ? Object.entries(config.defs) : [];
   const pure = (c: Compiled | number, known: Set<string>) =>
-    typeof c === "number" || ([...c.names].every((n) => known.has(n) || n in CONSTANTS) && [...c.calls].every((f) => f in FUNCTIONS));
+    typeof c === "number" || ([...c.names].every((n) => known.has(n) || n in CONSTANTS) && [...c.calls].every((f) => f in FUNCTIONS || known.has(f)));
   const presetParams = new Map((spec.presets ?? []).map((p) => [p.id, p.params ?? {}]));
   const out = new Map<string, number[]>();
   const add = (msg: string, beat: number) => out.set(msg, [...(out.get(msg) ?? []), beat]);
@@ -110,6 +114,16 @@ export function staticReadoutProblems(config: unknown, spec: DemoSpec, templateI
     }
     for (const r of readouts) {
       if (!pure(r.c, known)) continue;
+      if (typeof r.c !== "number") {
+        // Text readouts (a chosen value, a state name, a hash) are fine as they are.
+        let raw: unknown;
+        try {
+          raw = r.c(env);
+        } catch {
+          raw = NaN;
+        }
+        if (typeof raw === "string" && raw !== "" && Number.isNaN(Number(raw))) continue;
+      }
       const v = typeof r.c === "number" ? r.c : evalNum(r.c, env);
       if (!Number.isFinite(v)) {
         add(`readout "${r.id}" ("${r.src}") is ${v} — check the formula and the params`, i);
@@ -144,6 +158,10 @@ export const TEMPLATES: TemplateInfo[] = [
   entry("heap-allocator", "Heap allocator", validateHeapAllocator),
   entry("attention-heads", "Attention heads", validateAttentionHeads),
   entry("layer-stack", "Transformer layer stack", validateLayerStack),
+  entry("message-sequence", "Message sequence between nodes", validateMessageSequence),
+  entry("hash-chain", "Hash chain and Merkle tree", validateHashChain),
+  entry("state-machine", "Automaton or Turing machine", validateStateMachine),
+  entry("markov-chain", "Markov chain and random walk", validateMarkovChain),
 ];
 
 export function templateInfo(id: string | undefined): TemplateInfo | undefined {

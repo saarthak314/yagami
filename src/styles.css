@@ -1175,6 +1175,22 @@ kbd {
   border-color: var(--accent);
 }
 
+/* A demo verify couldn't confirm: a small muted "?" (the reason is in the title and the pane). */
+.toc-demo.flagged {
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+}
+
+.toc-flag {
+  font-size: 11px;
+  color: var(--faint);
+  padding: 0 4px;
+}
+
+.palette-flag {
+  color: var(--faint);
+  font-style: italic;
+}
+
 /* ------------------------------------------------------------------ pages */
 
 .reader {
@@ -1221,6 +1237,14 @@ kbd {
   right: 0;
   top: -12px;
   border-top: 1px solid var(--border);
+}
+
+/* Fit column: a page's right column follows its left one, set off by a short dashed rule. */
+.page.col-second::before {
+  top: -6px;
+  left: 30%;
+  right: 30%;
+  border-top-style: dashed;
 }
 
 .anchor-hl {
@@ -1385,6 +1409,15 @@ body.resizing .resize-handle {
   color: var(--fg);
   max-width: 60ch;
   min-height: calc(2 * 1.55em);
+}
+
+.demo-flag {
+  margin: 6px 0 0;
+  max-width: 60ch;
+  font-size: 12px;
+  line-height: 1.45;
+  font-style: italic;
+  color: var(--muted);
 }
 
 .demo-stage {

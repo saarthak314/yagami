@@ -2,7 +2,11 @@
 // Pure TypeScript (no DOM/React) so the Node pipeline can import it through catalog.ts.
 
 import type { DemoSpec } from "../../types";
-import { BUILTIN_FUNCTIONS, checkExpr, evalNum, tryCompile, type Env } from "./expr";
+import { BUILTIN_FUNCTIONS, checkExpr, evalNum, tryCompile, type Env, type Value } from "./expr";
+import { PROTOCOLS, PROTOCOL_EVENTS, PROTOCOL_VARS, SEQ_COMMON_VARS, runProtocol, type MsgEvent, type Protocol, type SeqSetup } from "./protocol";
+import { HASH_VARS, runHashChain, type HashSetup } from "./hashing";
+import { MACHINE_VARS, opsProblem, runMachine, type MachineSetup, type Transition } from "./machine";
+import { MARKOV_FNS, MARKOV_VARS, runMarkov, type MarkovRun } from "./markov";
 
 /** A number, or an expression string over params and the template's variables. */
 export type Num = number | string;
@@ -66,7 +70,9 @@ export interface MatrixOpsConfig extends Common {
 
 export interface SimHistogramConfig extends Common {
   seed?: number;
-  trial: string;
+  trial?: string;
+  process?: { init: Record<string, Num>; step: Record<string, string>; until?: string; maxSteps?: Num; result: string };
+  categories?: string[];
   trials: Num;
   perSecond?: number;
   bins?: { min: Num; max: Num; count?: number; log?: boolean } | "integer";
@@ -81,7 +87,7 @@ export interface TableBarsConfig extends Common {
   highlight?: Num;
 }
 
-export const ALGORITHMS = ["binary-search", "linear-search", "insertion-sort", "bubble-sort", "selection-sort", "merge-sort", "bfs", "dfs", "two-pointers"] as const;
+export const ALGORITHMS = ["binary-search", "linear-search", "insertion-sort", "bubble-sort", "selection-sort", "merge-sort", "bfs", "dfs", "two-pointers", "fold"] as const;
 export type Algorithm = (typeof ALGORITHMS)[number];
 export interface AlgorithmStepsConfig extends Common {
   algorithm: Algorithm;
@@ -89,7 +95,27 @@ export interface AlgorithmStepsConfig extends Common {
   target?: Num;
   graph?: { nodes: string[]; edges: [string, string][]; start: string; directed?: boolean };
   speed?: Num;
-  code?: boolean;
+  /** false hides the code panel; lines replace the built-in listing. */
+  code?: boolean | string[];
+  /** fold: acc = step(acc, x) over the input, left to right (e.g. a string hash). */
+  fold?: { input: string | number[]; init: Num; step: string; name?: string; lines?: [number, number, number] };
+}
+
+/** Functions the fold step may use (32-bit wrap-around like Java/C ints). */
+export const FOLD_FNS = ["int32", "uint32"];
+const wrap32 = (v: Value) => ((Math.trunc(Number(v)) % 2 ** 32) + 2 ** 32) % 2 ** 32;
+export const FOLD_ENV: Env = { int32: (v) => (wrap32(v) >= 2 ** 31 ? wrap32(v) - 2 ** 32 : wrap32(v)), uint32: (v) => wrap32(v) };
+
+/** fold: the input as numbers (character codes for a string) and the accumulator after each element. */
+export function foldRun(f: NonNullable<AlgorithmStepsConfig["fold"]>, env: Env): { xs: number[]; chars: string[]; accs: number[] } {
+  const chars = typeof f.input === "string" ? [...f.input].slice(0, 16) : f.input.slice(0, 16).map(String);
+  const xs = typeof f.input === "string" ? chars.map((ch) => ch.codePointAt(0) ?? 0) : f.input.slice(0, 16);
+  const init = typeof f.init === "number" ? f.init : tryCompile(f.init);
+  const step = tryCompile(f.step);
+  const e: Env = { ...env, ...FOLD_ENV, n: xs.length };
+  const accs = [typeof init === "string" ? NaN : evalNum(init, e)];
+  xs.forEach((x, i) => accs.push(typeof step === "string" ? NaN : evalNum(step, { ...e, acc: accs[i], x, i, ch: chars[i] })));
+  return { xs, chars, accs };
 }
 
 // ---------------------------------------------------------------------------
@@ -334,8 +360,24 @@ export function validateSimHistogram(c: unknown, spec: DemoSpec): string[] {
   if (!isObj(c)) return ["config must be an object"];
   const k = base(spec, ["t"], [...RANDOM_FNS_ALL, "frac"]);
   k.defs(c.defs);
-  k.expr(c.trial, "trial");
+  if (isObj(c.process)) {
+    const p = c.process;
+    const names = isObj(p.init) ? Object.keys(p.init) : [];
+    if (!isObj(p.init) || !names.length) k.add("process.init: { variable: start value }");
+    else for (const [n, v] of Object.entries(p.init)) k.expr(v, `process.init.${n}`, [...names, "k"]);
+    if (!isObj(p.step) || !Object.keys(p.step).length) k.add("process.step: { variable: expr for its next value }");
+    else for (const [n, v] of Object.entries(p.step)) {
+      if (!names.includes(n)) k.add(`process.step.${n}: not a variable of process.init`);
+      k.expr(v, `process.step.${n}`, [...names, "k"]);
+    }
+    k.optExpr(p.until, "process.until", [...names, "k"]);
+    k.optExpr(p.maxSteps, "process.maxSteps");
+    k.expr(p.result, "process.result", [...names, "k"]);
+    if (c.trial !== undefined) k.add("trial: give trial or process, not both");
+  } else k.expr(c.trial, "trial");
   k.expr(c.trials, "trials");
+  if (c.categories !== undefined && !(Array.isArray(c.categories) && c.categories.length >= 2 && c.categories.length <= 12 && c.categories.every((x) => typeof x === "string")))
+    k.add("categories: 2–12 names (results are their indices 0, 1, …)");
   if (c.bins !== undefined && c.bins !== "integer") {
     if (!isObj(c.bins)) k.add('bins: must be "integer" or { min, max, count?, log? }');
     else {
@@ -382,12 +424,25 @@ export function validateTableBars(c: unknown, spec: DemoSpec): string[] {
 
 export function validateAlgorithmSteps(c: unknown, spec: DemoSpec): string[] {
   if (!isObj(c)) return ["config must be an object"];
-  const k = base(spec, ["t"]);
+  const k = base(spec, ["t"], FOLD_FNS);
   k.defs(c.defs);
   const alg = c.algorithm as Algorithm;
   if (!ALGORITHMS.includes(alg)) k.add(`algorithm: must be one of ${ALGORITHMS.join(", ")}`);
   const graphAlg = alg === "bfs" || alg === "dfs";
-  if (graphAlg) {
+  if (c.code !== undefined && typeof c.code !== "boolean" && !(Array.isArray(c.code) && c.code.length >= 1 && c.code.length <= 14 && c.code.every((l) => typeof l === "string")))
+    k.add("code: true/false, or 1–14 code lines");
+  if (alg === "fold") {
+    const f = c.fold;
+    if (!isObj(f)) k.add("fold: { input, init, step } is required");
+    else {
+      const inp = f.input;
+      if (!((typeof inp === "string" && inp.length >= 1 && inp.length <= 16) || (Array.isArray(inp) && inp.length >= 1 && inp.length <= 16 && inp.every((x) => typeof x === "number")))) k.add("fold.input: a string or 1–16 numbers");
+      k.expr(f.init, "fold.init");
+      k.expr(f.step, "fold.step", ["acc", "x", "i", "n", "ch"]);
+      const n = Array.isArray(c.code) ? c.code.length : 4;
+      if (f.lines !== undefined && !(Array.isArray(f.lines) && f.lines.length === 3 && f.lines.every((l) => Number.isInteger(l) && (l as number) >= 0 && (l as number) < n))) k.add(`fold.lines: [init, update, return] line indices < ${n}`);
+    }
+  } else if (graphAlg) {
     const g = c.graph;
     if (!isObj(g) || !Array.isArray(g.nodes) || !Array.isArray(g.edges)) k.add("graph: { nodes, edges, start } is required for bfs/dfs");
     else {
@@ -405,7 +460,7 @@ export function validateAlgorithmSteps(c: unknown, spec: DemoSpec): string[] {
     if (alg === "binary-search" || alg === "linear-search" || alg === "two-pointers") k.expr(c.target, "target");
   }
   k.optExpr(c.speed, "speed");
-  const vars = ["step", "steps", "comparisons", "swaps", "done", "found", "n", "lo", "hi", "mid", "i", "j", "visited", "frontier"];
+  const vars = ["step", "steps", "comparisons", "swaps", "done", "found", "n", "lo", "hi", "mid", "i", "j", "visited", "frontier", "acc", "x", "result"];
   k.readouts(c.readouts, spec, vars);
   return k.problems;
 }
@@ -489,7 +544,7 @@ export interface CellGridConfig extends Common {
   message?: string;
 }
 
-export const STRUCTURES = ["stack", "queue", "linked-list", "bst", "min-heap", "hash-table"] as const;
+export const STRUCTURES = ["stack", "queue", "linked-list", "bst", "min-heap", "hash-table", "open-addressing"] as const;
 export type Structure = (typeof STRUCTURES)[number];
 export const STRUCTURE_OPS = ["push", "pop", "enqueue", "dequeue", "insert", "delete", "search"] as const;
 export type StructureOp = (typeof STRUCTURE_OPS)[number];
@@ -742,6 +797,7 @@ export function validateDataStructure(c: unknown, spec: DemoSpec): string[] {
     bst: ["insert", "delete", "search"],
     "min-heap": ["insert", "pop"],
     "hash-table": ["insert", "delete", "search"],
+    "open-addressing": ["insert", "delete", "search"],
   };
   ops.forEach((o, i) => {
     if (!isObj(o)) return k.add(`ops[${i}]: must be { op, value? }`);
@@ -752,7 +808,7 @@ export function validateDataStructure(c: unknown, spec: DemoSpec): string[] {
   k.optExpr(c.buckets, "buckets");
   k.optExpr(c.hash, "hash", ["key", "m"]);
   k.optExpr(c.speed, "speed");
-  k.readouts(c.readouts, spec, ["step", "steps", "size", "comparisons", "height", "collisions", "maxChain", "found", "top", "done"]);
+  k.readouts(c.readouts, spec, ["step", "steps", "size", "comparisons", "height", "collisions", "maxChain", "found", "top", "done", "probes", "runLength", "dels", "load"]);
   return k.problems;
 }
 
@@ -846,6 +902,23 @@ export const STATIC_VARS: Record<string, (config: never, env: Env) => Env> = {
     return { n: v.n, m: v.m, h: v.h, dk: v.dk, dModel: v.dModel, projOps: v.projOps, scoreOps: v.scoreOps, params: v.params };
   },
   "layer-stack": (config: LayerStackConfig, env: Env) => layerStackStatic(config, env).vars,
+  "algorithm-steps": (config: AlgorithmStepsConfig, env: Env) => (config.algorithm === "fold" && config.fold ? { result: foldRun(config.fold, env).accs.at(-1)! } : {}),
+  "message-sequence": (config: MessageSequenceConfig, env: Env) => {
+    const steps = runProtocol(seqSetup(config, env));
+    return finals({ ...steps[steps.length - 1].vars, steps: steps.length });
+  },
+  "hash-chain": (config: HashChainConfig, env: Env) => {
+    const steps = runHashChain(hashSetup(config, env));
+    return finals({ ...steps[steps.length - 1].vars, steps: steps.length });
+  },
+  "state-machine": (config: StateMachineConfig, env: Env) => {
+    const steps = runMachine(machineSetup(config, env));
+    return finals({ ...steps[steps.length - 1].vars, steps: steps.length });
+  },
+  "markov-chain": (config: MarkovChainConfig, env: Env) => {
+    const f = markovFns(markovRun(config, env), 0);
+    return { stat: f.stat, absorb: f.absorb, hit: f.hit, prob: f.prob, walkers: f.walkers, expDuration: f.expDuration, duration: f.duration };
+  },
 };
 
 export type Sublayer = "attention" | "cross" | "ffn";
@@ -933,6 +1006,309 @@ export function validateLayerStack(c: unknown, spec: DemoSpec): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// message-sequence, hash-chain, state-machine, markov-chain
+// ---------------------------------------------------------------------------
+
+export interface MessageSequenceConfig extends Common {
+  protocol: Protocol;
+  nodes: string[];
+  acceptors?: string[];
+  logs?: Record<string, number[]>;
+  terms?: Record<string, number>;
+  links?: [string, string][];
+  state?: Record<string, Record<string, string | number>>;
+  events: MsgEvent[] | Record<string, MsgEvent[]>;
+  scenario?: string;
+  speed?: Num;
+}
+
+export interface HashChainConfig extends Common {
+  mode: "chain" | "merkle";
+  records: string[];
+  hashLen?: number;
+  difficulty?: Num;
+  tamper?: { index: Num; value?: string };
+  redo?: Num;
+  proof?: Num;
+  keep?: number[];
+  prune?: Num;
+  speed?: Num;
+}
+
+export interface StateMachineConfig extends Common {
+  kind: "dfa" | "turing";
+  start: string;
+  accept?: string[];
+  transitions: Transition[];
+  input?: string;
+  head?: number;
+  maxSteps?: Num;
+  speed?: Num;
+}
+
+export interface MarkovChainConfig extends Common {
+  states?: string[];
+  edges?: { from: string; to: string; p: Num }[];
+  walk?: { n: Num; p: Num; start?: Num };
+  start?: string | number;
+  layout?: "circle" | "line";
+  walkers?: Num;
+  seed?: number;
+  horizon?: Num;
+  speed?: Num;
+}
+
+const staticNum = (f: Num | undefined, env: Env, d: number): number => {
+  const c = f === undefined ? undefined : typeof f === "number" ? f : tryCompile(f);
+  const x = c === undefined || typeof c === "string" ? d : evalNum(c, env);
+  return Number.isFinite(x) ? x : d;
+};
+const staticStr = (f: string | undefined, env: Env): string | undefined => {
+  if (f === undefined) return undefined;
+  const c = tryCompile(f);
+  if (typeof c === "string") return undefined;
+  try {
+    return String(c(env));
+  } catch {
+    return undefined;
+  }
+};
+
+/** The scenario a message-sequence config plays at these params. */
+export function seqSetup(c: MessageSequenceConfig, env: Env): SeqSetup {
+  let events: MsgEvent[] = [];
+  if (Array.isArray(c.events)) events = c.events;
+  else if (isObj(c.events)) {
+    const names = Object.keys(c.events);
+    const pick = staticStr(c.scenario, env);
+    events = c.events[pick && pick in c.events ? pick : names[0]] ?? [];
+  }
+  // Paxos roles don't change with the scenario: proposers are the nodes that propose in any of them.
+  const all = Array.isArray(c.events) ? c.events : isObj(c.events) ? Object.values(c.events).flat() : [];
+  const proposers = new Set(all.flatMap((e) => (e.do === "prepare" || e.do === "accept" ? [e.by].flat() : [])));
+  const acceptors = c.acceptors?.length ? c.acceptors : c.protocol === "paxos" ? c.nodes.filter((n) => !proposers.has(n)) : undefined;
+  return { protocol: c.protocol, nodes: c.nodes, acceptors, logs: c.logs, terms: c.terms, links: c.links, state: c.state, events };
+}
+
+export function hashSetup(c: HashChainConfig, env: Env): HashSetup {
+  const n = c.records.length;
+  const keep = c.keep && (c.prune === undefined || staticNum(c.prune, env, 1) !== 0) ? c.keep.map((k) => Math.round(k)) : null;
+  return {
+    mode: c.mode,
+    records: c.records.slice(0, 8),
+    hashLen: Math.max(2, Math.min(8, Math.round(c.hashLen ?? 4))),
+    difficulty: Math.max(0, Math.min(3, Math.round(staticNum(c.difficulty, env, 0)))),
+    tamper: c.tamper ? Math.round(staticNum(c.tamper.index, env, -1)) : -1,
+    tamperValue: c.tamper?.value,
+    redo: staticNum(c.redo, env, 0) !== 0,
+    proof: Math.min(n - 1, Math.round(staticNum(c.proof, env, -1))),
+    keep,
+  };
+}
+
+export function machineSetup(c: StateMachineConfig, env: Env): MachineSetup {
+  return {
+    kind: c.kind,
+    start: c.start,
+    accept: c.accept ?? [],
+    transitions: c.transitions,
+    input: c.input ?? "",
+    head: Math.round(c.head ?? 0),
+    maxSteps: Math.max(1, Math.min(200, Math.round(staticNum(c.maxSteps, env, c.kind === "dfa" ? 64 : 40)))),
+  };
+}
+
+/** States, transition matrix and start state of a markov-chain config (rows short of 1 keep the rest as a self-loop). */
+export function markovModel(c: MarkovChainConfig, env: Env): { names: string[]; P: number[][]; start: number } {
+  if (c.walk) {
+    const T = Math.max(2, Math.min(40, Math.round(staticNum(c.walk.n, env, 10))));
+    const p = Math.max(0, Math.min(1, staticNum(c.walk.p, env, 0.5)));
+    const names = Array.from({ length: T + 1 }, (_, i) => String(i));
+    const P = names.map((_, i) => names.map((__, j) => (i === 0 || i === T ? (i === j ? 1 : 0) : j === i + 1 ? p : j === i - 1 ? 1 - p : 0)));
+    const start = Math.max(0, Math.min(T, Math.round(staticNum(c.walk.start, env, Math.floor(T / 2)))));
+    return { names, P, start };
+  }
+  const names = (c.states ?? []).slice(0, 12);
+  const P = names.map(() => names.map(() => 0));
+  for (const e of c.edges ?? []) {
+    const i = names.indexOf(e.from);
+    const j = names.indexOf(e.to);
+    if (i >= 0 && j >= 0) P[i][j] += Math.max(0, staticNum(e.p, env, 0));
+  }
+  P.forEach((row, i) => {
+    const s = row.reduce((a, b) => a + b, 0);
+    if (s > 1 + 1e-9) row.forEach((v, j) => (row[j] = v / s));
+    else row[i] += 1 - s;
+  });
+  let start = 0;
+  if (typeof c.start === "string" && names.includes(c.start)) start = names.indexOf(c.start);
+  else if (c.start !== undefined) {
+    const v = typeof c.start === "number" ? c.start : staticStr(c.start, env);
+    const k = typeof v === "string" && names.includes(v) ? names.indexOf(v) : Math.round(Number(v));
+    start = Number.isFinite(k) ? Math.max(0, Math.min(names.length - 1, k)) : 0;
+  }
+  return { names, P, start };
+}
+
+export function markovRun(c: MarkovChainConfig, env: Env): MarkovRun {
+  const m = markovModel(c, env);
+  let a = (c.seed ?? 1) >>> 0;
+  const next = () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  return runMarkov({ ...m, horizon: Math.max(1, Math.min(200, Math.round(staticNum(c.horizon, env, 30)))), walkers: staticNum(c.walkers, env, 0), next });
+}
+
+/** Markov readout functions over a run (state by name or index). */
+export function markovFns(run: MarkovRun, t: number): Env {
+  const at = (s: unknown) => (typeof s === "string" && run.names.includes(s) ? run.names.indexOf(s) : Math.round(Number(s)));
+  const get = (arr: number[]) => (s: unknown) => arr[at(s)] ?? NaN;
+  const tt = Math.max(0, Math.min(run.dist.length - 1, t));
+  return {
+    dist: get(run.dist[tt]),
+    emp: get(run.emp[tt] ?? []),
+    stat: get(run.limit),
+    absorb: get(run.absorb),
+    hit: get(run.hit),
+    prob: (a: unknown, b: unknown) => run.P[at(a)]?.[at(b)] ?? NaN,
+    absorbed: run.absorbedAt[tt] ?? 0,
+    walkers: run.walkers,
+    expDuration: run.expDuration,
+    duration: run.duration,
+  } as Env;
+}
+
+/** Last-step values as final_<name> (what a step-through ends with; usable in expect). */
+const finals = (vars: Record<string, unknown>): Env => Object.fromEntries(Object.entries(vars).map(([k, v]) => [`final_${k}`, v as Value]));
+
+const strList = (v: unknown, min: number, max: number) => Array.isArray(v) && v.length >= min && v.length <= max && v.every((x) => typeof x === "string" && x.length > 0);
+
+export function validateMessageSequence(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const proto = c.protocol as Protocol;
+  const pv = PROTOCOLS.includes(proto) ? PROTOCOL_VARS[proto] : [];
+  const vars = [...SEQ_COMMON_VARS, ...pv];
+  const k = base(spec, [...vars, ...vars.map((v) => `final_${v}`)], ["st"]);
+  k.defs(c.defs);
+  if (!PROTOCOLS.includes(proto)) k.add(`protocol: one of ${PROTOCOLS.join(", ")}`);
+  if (!strList(c.nodes, 2, 7) || new Set(c.nodes as string[]).size !== (c.nodes as string[]).length) k.add("nodes: 2–7 distinct names");
+  const nodes = Array.isArray(c.nodes) ? (c.nodes as string[]) : [];
+  const ref = (v: unknown, where: string, star = false) => {
+    for (const x of Array.isArray(v) ? v : [v]) if (!(typeof x === "string" && (nodes.includes(x) || (star && x === "*")))) k.add(`${where}: "${String(x)}" is not a node (${nodes.join(", ")})`);
+  };
+  if (c.acceptors !== undefined) ref(c.acceptors, "acceptors");
+  if (c.links !== undefined) (Array.isArray(c.links) ? c.links : []).forEach((l, i) => ref(l, `links[${i}]`));
+  if (isObj(c.logs))
+    for (const [n, l] of Object.entries(c.logs)) {
+      ref(n, "logs");
+      if (!Array.isArray(l) || l.length > 12 || !l.every((t, i) => Number.isInteger(t) && t >= 1 && (i === 0 || t >= l[i - 1]))) k.add(`logs.${n}: up to 12 entry terms (integers ≥ 1, non-decreasing)`);
+    }
+  const allowed = PROTOCOLS.includes(proto) ? PROTOCOL_EVENTS[proto] : [];
+  const checkEvents = (evs: unknown, where: string) => {
+    if (!Array.isArray(evs) || !evs.length || evs.length > 30) return k.add(`${where}: 1–30 events`);
+    evs.forEach((e, i) => {
+      const w = `${where}[${i}]`;
+      if (!isObj(e) || !allowed.includes(e.do as string)) return k.add(`${w}.do: ${proto} events are ${allowed.join(", ")}`);
+      for (const f of ["by", "node", "lose", "loseReply"]) if (e[f] !== undefined) ref(e[f], `${w}.${f}`);
+      if (e.to !== undefined) ref(e.to, `${w}.to`, proto === "script");
+      if (["prepare", "accept"].includes(e.do as string) && typeof e.by !== "string") k.add(`${w}.by: the proposer`);
+      if (e.do === "prepare" && e.n !== undefined && !(Number.isInteger(e.n) && (e.n as number) > 0)) k.add(`${w}.n: a positive integer proposal number`);
+      if (["crash", "recover", "timeout"].includes(e.do as string) && typeof e.node !== "string") k.add(`${w}.node: required`);
+      if (e.do === "mine" && e.by === undefined) k.add(`${w}.by: the miner(s)`);
+      if (e.do === "send" && (e.by === undefined || typeof e.msg !== "string")) k.add(`${w}: send needs by and msg`);
+    });
+  };
+  if (Array.isArray(c.events)) checkEvents(c.events, "events");
+  else if (isObj(c.events)) {
+    for (const [name, evs] of Object.entries(c.events)) checkEvents(evs, `events.${name}`);
+    k.expr(c.scenario, "scenario");
+  } else k.add("events: a list of events, or { scenarioName: [events] } with scenario");
+  k.optExpr(c.speed, "speed");
+  k.readouts(c.readouts, spec);
+  return k.problems;
+}
+
+export function validateHashChain(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, [...HASH_VARS, ...HASH_VARS.map((v) => `final_${v}`)]);
+  k.defs(c.defs);
+  if (c.mode !== "chain" && c.mode !== "merkle") k.add("mode: chain | merkle");
+  if (!strList(c.records, 2, 8)) k.add("records: 2–8 strings");
+  const n = Array.isArray(c.records) ? c.records.length : 0;
+  if (c.hashLen !== undefined && !(Number.isInteger(c.hashLen) && (c.hashLen as number) >= 2 && (c.hashLen as number) <= 8)) k.add("hashLen: 2–8 hex digits");
+  for (const f of ["difficulty", "redo", "proof", "prune", "speed"]) k.optExpr(c[f], f);
+  if (c.tamper !== undefined) {
+    if (!isObj(c.tamper)) k.add("tamper: { index, value? }");
+    else k.expr(c.tamper.index, "tamper.index");
+  }
+  if (c.keep !== undefined && !(Array.isArray(c.keep) && c.keep.every((x) => Number.isInteger(x) && (x as number) >= 0 && (x as number) < n))) k.add(`keep: leaf indices 0–${n - 1}`);
+  if (c.mode === "chain" && (c.keep !== undefined || c.proof !== undefined)) k.add("keep/proof: merkle mode only");
+  k.readouts(c.readouts, spec);
+  return k.problems;
+}
+
+export function validateStateMachine(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, [...MACHINE_VARS, ...MACHINE_VARS.map((v) => `final_${v}`)], ["cell", "count"]);
+  k.defs(c.defs);
+  if (c.kind !== "dfa" && c.kind !== "turing") k.add("kind: dfa | turing");
+  const rows = Array.isArray(c.transitions) ? c.transitions : [];
+  if (!rows.length || rows.length > 24) k.add("transitions: 1–24 rows");
+  const states = new Set<string>();
+  rows.forEach((r, i) => {
+    if (!isObj(r) || typeof r.from !== "string" || typeof r.to !== "string" || typeof r.read !== "string" || !r.read.length) return k.add(`transitions[${i}]: { from, read, to${c.kind === "turing" ? ", ops" : ""} }`);
+    states.add(r.from);
+    states.add(r.to);
+    if (c.kind === "dfa" && r.read.length !== 1) k.add(`transitions[${i}].read: one symbol`);
+    if (c.kind === "turing") {
+      const p = opsProblem(r as unknown as Transition);
+      if (p) k.add(`transitions[${i}].ops: ${p}`);
+    }
+  });
+  if (typeof c.start !== "string" || !states.has(c.start)) k.add("start: a state used in transitions");
+  if (c.accept !== undefined && !(Array.isArray(c.accept) && c.accept.every((s) => typeof s === "string" && states.has(s)))) k.add("accept: states used in transitions");
+  if (c.input !== undefined && (typeof c.input !== "string" || c.input.length > 40)) k.add("input: a string of ≤ 40 symbols (_ = blank)");
+  k.optExpr(c.maxSteps, "maxSteps");
+  k.optExpr(c.speed, "speed");
+  k.readouts(c.readouts, spec);
+  return k.problems;
+}
+
+export function validateMarkovChain(c: unknown, spec: DemoSpec): string[] {
+  if (!isObj(c)) return ["config must be an object"];
+  const k = base(spec, MARKOV_VARS, MARKOV_FNS);
+  k.defs(c.defs);
+  if (isObj(c.walk)) {
+    k.expr(c.walk.n, "walk.n");
+    k.expr(c.walk.p, "walk.p");
+    k.optExpr(c.walk.start, "walk.start");
+  } else {
+    const states = Array.isArray(c.states) ? (c.states as string[]) : [];
+    if (!strList(c.states, 2, 12) || new Set(states).size !== states.length) k.add("states: 2–12 distinct names (or walk: { n, p, start })");
+    const sums = new Map<string, number>();
+    (Array.isArray(c.edges) ? c.edges : []).forEach((e, i) => {
+      if (!isObj(e) || !states.includes(e.from as string) || !states.includes(e.to as string)) return k.add(`edges[${i}]: { from, to, p } between listed states`);
+      k.expr(e.p, `edges[${i}].p`);
+      if (typeof e.p === "number") {
+        if (e.p < 0 || e.p > 1) k.add(`edges[${i}].p: a probability in [0, 1]`);
+        sums.set(e.from as string, (sums.get(e.from as string) ?? 0) + e.p);
+      }
+    });
+    if (!Array.isArray(c.edges) || !c.edges.length) k.add("edges: [{ from, to, p }] are required");
+    for (const [s, v] of sums) if (v > 1 + 1e-6) k.add(`edges from ${s}: probabilities add to ${Number(v.toFixed(4))} > 1`);
+    if (typeof c.start === "string" && !states.includes(c.start)) k.expr(c.start, "start");
+  }
+  if (c.layout !== undefined && c.layout !== "circle" && c.layout !== "line") k.add("layout: circle | line");
+  for (const f of ["walkers", "horizon", "speed"]) k.optExpr(c[f], f);
+  k.readouts(c.readouts, spec);
+  return k.problems;
+}
+
+// ---------------------------------------------------------------------------
 // Docs (what the planner reads; keep them short and exact)
 // ---------------------------------------------------------------------------
 
@@ -997,8 +1373,8 @@ export const DOCS = {
     },
   },
   "sim-histogram": {
-    when: "chance and statistics: repeated random trials (coins, dice, sums, random walks, sampling, heavy-tailed sizes on log bins) building a histogram that approaches an expected distribution; law of large numbers.",
-    configDoc: `{ seed?, trial: "expr per trial" (random: rand() uniform 0–1, randn() normal, randint(a,b) inclusive, coin(p) 0/1, exprand(rate), pareto(alpha, xmin), lognormal(mu, sigma), powerlaw(lo, hi, alpha) ∝ x^−alpha; repeat(n, expr) sums n draws), trials: total, perSecond? (animation rate), bins?: "integer" | { min, max, count?, log? (log-spaced bins and axis for heavy tails) } (integer when values are whole), expected?: "expr in x" (probability per integer x, or density for continuous bins) drawn as a line, xLabel?, readouts }. Variables: n (trials so far), mean, sd, last; frac(lo, hi) = share of results in [lo, hi] — these change while trials accumulate, so never use them in expect (expect only param-derived readouts like k*p). Expressions, defs, readouts: as in function-plot.`,
+    when: "chance and statistics: repeated random trials (coins, dice, sums, categorical outcomes, multi-step processes played to the end, sampling, heavy-tailed sizes on log bins) building a histogram that approaches an expected distribution; law of large numbers.",
+    configDoc: `{ seed?, trial: "expr per trial" (random: rand() uniform 0–1, randn() normal, randint(a,b) inclusive, coin(p) 0/1, exprand(rate), pareto(alpha, xmin), lognormal(mu, sigma), powerlaw(lo, hi, alpha) ∝ x^−alpha; repeat(n, expr) sums n draws) | process: { init: { var: start }, step: { var: "next value" } (all update together, random draws allowed), until?: "stop condition", maxSteps? (1000), result: "expr" } (a multi-step process played per trial, e.g. a gambler's ruin; k = steps taken), trials: total, categories?: [names] (results are indices 0…), perSecond? (animation rate), bins?: "integer" | { min, max, count?, log? (log-spaced bins and axis for heavy tails) } (integer when values are whole), expected?: "expr in x" (probability per integer x, or density for continuous bins) drawn as a line, xLabel?, readouts }. Variables: n (trials so far), mean, sd, last; frac(lo, hi) = share of results in [lo, hi] — these change while trials accumulate, so never use them in expect (expect only param-derived readouts like k*p). Expressions, defs, readouts: as in function-plot.`,
     example: {
       seed: 3,
       trial: "repeat(k, coin(p))",
@@ -1028,7 +1404,7 @@ export const DOCS = {
   },
   "algorithm-steps": {
     when: `step-through of a classic algorithm on a small input: ${ALGORITHMS.join(", ")} — cells/pointers or a small graph, the code line being executed, and counters.`,
-    configDoc: `{ algorithm: ${ALGORITHMS.join("|")}, array?: number[] (2–16) | { n, seed?, max?, sorted? }, target? (searches, two-pointers sum), graph?: { nodes: string[] (≤12), edges: [[a,b]], start, directed? } (bfs/dfs), speed? (steps per second, default 1), code? (show pseudocode, default true), defs?, readouts }. Readout variables: step, steps, comparisons, swaps, done (0/1), found (index or -1), n, lo, hi, mid, i, j, visited, frontier. Expressions, defs, readouts: as in function-plot.`,
+    configDoc: `{ algorithm: ${ALGORITHMS.join("|")}, array?: number[] (2–16) | { n, seed?, max?, sorted? }, target? (searches, two-pointers sum), graph?: { nodes: string[] (≤12), edges: [[a,b]], start, directed? } (bfs/dfs), fold?: { input: string (characters → their codes) | number[] (≤ 16), init, step: "expr in acc, x, i, n, ch" (int32(v)/uint32(v) wrap like 32-bit ints), name? ('h'), lines?: [init, update, return] code line indices } (fold: acc = step(acc, x) left to right, e.g. a string hashCode), speed? (steps per second, default 1), code? (false hides it; string[] replaces the listing), defs?, readouts }. Readout variables: step, steps, comparisons, swaps, done (0/1), found (index or -1), n, lo, hi, mid, i, j, visited, frontier, acc, x; result = fold's final value (fine for expect). Expressions, defs, readouts: as in function-plot.`,
     example: {
       algorithm: "binary-search",
       array: { n: 15, seed: 3, sorted: true },
@@ -1102,8 +1478,8 @@ export const DOCS = {
     },
   },
   "data-structure": {
-    when: "a data structure under a list of operations: stack, queue, sorted linked list, binary search tree, min-heap (sift up/down), hash table with chaining (collisions, load factor).",
-    configDoc: `{ defs?, kind: ${STRUCTURES.join("|")}, ops: [{ op: push|pop|enqueue|dequeue|insert|delete|search, value?: Num }] (1–24; stack push/pop/search, queue enqueue/dequeue/search, min-heap insert/pop, others insert/delete/search), buckets?: Num (hash-table, 7), hash?: "expr in key, m" (default key mod m), speed?: Num (steps per second, 1), code? (show the operation's pseudocode, default true), readouts }. Readout variables: step, steps, size, comparisons, height (bst/heap), collisions, maxChain (hash-table), found (1/0 for the last search), top (top/front/min value), done — they change as the steps play, so never use them in expect. Expressions, defs, readouts: as in function-plot.`,
+    when: "a data structure under a list of operations: stack, queue, sorted linked list, binary search tree, min-heap (sift up/down), hash table with chaining, or open addressing with linear probing (del markers, wrap-around, runs).",
+    configDoc: `{ defs?, kind: ${STRUCTURES.join("|")}, ops: [{ op: push|pop|enqueue|dequeue|insert|delete|search, value?: Num }] (1–24; stack push/pop/search, queue enqueue/dequeue/search, min-heap insert/pop, others insert/delete/search), buckets?: Num (table size m: hash-table 7, open-addressing 10, ≤ 24), hash?: "expr in key, m" (default key mod m), speed?: Num (steps per second, 1), code? (show the operation's pseudocode, default true), readouts }. Readout variables: step, steps, size, comparisons, height (bst/heap), collisions, maxChain (hash-table), probes (this operation), runLength (longest run of non-null slots), dels, load ((keys + dels)/m) (open-addressing), found (1/0 for the last search), top (top/front/min value), done — they change as the steps play, so never use them in expect. Expressions, defs, readouts: as in function-plot.`,
     example: {
       kind: "bst",
       ops: [{ op: "insert", value: 50 }, { op: "insert", value: 30 }, { op: "insert", value: 70 }, { op: "insert", value: 20 }, { op: "insert", value: 40 }, { op: "search", value: 40 }],
@@ -1144,6 +1520,59 @@ export const DOCS = {
       residual: "res",
       norm: "norm",
       readouts: { rms: { expr: "rms", digits: 2 }, growth: { expr: "growth", digits: 2 }, params: "params" },
+    },
+  },
+  "message-sequence": {
+    when: "distributed protocols as a sequence diagram: nodes exchange requests/replies over rounds (losses, crashes), with per-node state and logs — Paxos (later proposers adopt the highest accepted value), Raft (elections, replication, repair, commit rule), block flooding (longest chain wins), or a scripted exchange.",
+    configDoc: `{ protocol: paxos|raft|flood|script, nodes: string[] (2–7), events: [event] (≤ 30) | { name: [event] } + scenario: "expr → name" (select param), speed?, readouts; paxos acceptors? (default: non-proposers); raft logs?: { node: [entry terms] }, terms?; flood links?: [[a,b]] (all pairs); script state?: { node: { key: value } } }. Events (optional note: caption, lose/loseReply: [nodes] whose requests/replies are lost): paxos {do:prepare, by, n, value?}, {do:accept, by, value?} (needs a majority of promises; proposes the highest-numbered accepted value they report, else its own); raft {do:timeout, node} (election), {do:client, value}, {do:replicate, to?} (steps back on mismatch; commits own-term entries on a majority; followers learn it on the next replicate); flood {do:mine, by (list = simultaneous), value}; script {do:send, by, to (node|list|"*"), msg, reply?, set?: { node: { key: value } }}, {do:set, set}; any {do:crash|recover, node}, {do:note, note}. The rules are applied, not scripted. Variables: step, steps, done, messages, lost, up; paxos chosen ('none'), chosenN, quorum, n, value, promises, accepts, promised; raft term, leader ('none'), leaders, committed, lastIndex, votes, quorum; flood height, reached, forks, agree, tip; st(node, key). final_<variable>: its value at the end (use in expect). Expressions: as in function-plot.`,
+    example: {
+      protocol: "paxos",
+      nodes: ["P1", "P2", "A1", "A2", "A3"],
+      events: [
+        { do: "prepare", by: "P1", n: 1, value: "x" },
+        { do: "accept", by: "P1", lose: ["A2", "A3"] },
+        { do: "prepare", by: "P2", n: 2, value: "y" },
+        { do: "accept", by: "P2" },
+      ],
+      readouts: { chosen: "final_chosen", quorum: "quorum" },
+    },
+  },
+  "hash-chain": {
+    when: "hash-linked records: a block chain (prev-hash links, toy proof-of-work, tampering breaks the next link, an attacker redoing the work) or a Merkle tree (pairs hashed up to the root, a leaf's proof path, tampering changes the root, pruning keeps only the needed hashes).",
+    configDoc: `{ mode: chain|merkle, records: string[] (2–8), hashLen? (hex digits shown, 4), difficulty? (chain: leading zero digits the hash needs, 0–3), tamper?: { index (expr, −1 none), value? }, redo? (chain: 1 = recompute every later block), proof? (merkle: leaf index, −1 none), keep?: [leaf indices] (merkle pruning; prune?: expr 1/0 to show it), speed?, readouts }. Toy hash (FNV-1a). Steps: build, then proof, tamper, redo/prune as configured. Variables: step, steps, done, n, blocks, valid (1/0), brokenAt (first block whose prev doesn't match, −1), work, redoWork (nonces tried), tip, root (hex), proofLen, verified, pruned, kept, depth; final_<variable> = its value at the end (use those in expect). Expressions: as in function-plot.`,
+    example: { mode: "merkle", records: ["Tx0", "Tx1", "Tx2", "Tx3"], proof: 3, keep: [3], readouts: { proof: "final_proofLen", pruned: "final_pruned" } },
+  },
+  "state-machine": {
+    when: "a finite automaton reading an input string (state graph, accept/reject) or a Turing machine stepping over its tape from a transition table (head, m-configuration, the active row highlighted).",
+    configDoc: `{ kind: dfa|turing, start, accept?: [states], transitions: [{ from, read (symbol; "_" blank; "*" any — an exact row wins), to, ops? (turing: "P0, R" — P<symbol> print, E erase, L, R, N; or write?, move?) }] (≤ 24), input? (string, "_" blank; the DFA's input or the initial tape), head? (0), maxSteps? (turing 40, ≤ 200), speed?, readouts }. A machine halts when no row matches. Variables: step, steps, done, state, head, halted, accepted (1/0; in accept), tape (text), moves, symbols (non-blank cells); cell(i), count(symbol); final_<variable> = its value at the end (use those in expect). Expressions: as in function-plot.`,
+    example: {
+      kind: "turing",
+      start: "b",
+      transitions: [
+        { from: "b", read: "_", ops: "P0, R", to: "c" },
+        { from: "c", read: "_", ops: "R", to: "e" },
+        { from: "e", read: "_", ops: "P1, R", to: "f" },
+        { from: "f", read: "_", ops: "R", to: "b" },
+      ],
+      maxSteps: 12,
+      readouts: { state: "state", zeros: "count('0')" },
+    },
+  },
+  "markov-chain": {
+    when: "Markov chains and random walks: a weighted digraph's distribution evolving step by step (to a stationary distribution, or oscillating), absorbing states (absorption probabilities, expected duration), gambler's ruin — with seeded walkers that play the chain.",
+    configDoc: `{ states: string[] (2–12), edges: [{ from, to, p }] (a row short of 1 keeps the rest as a self-loop; no out-edges = absorbing) | walk: { n (states 0..n ≤ 40; 0 and n absorb), p (up), start? }, start? (name or index), layout?: circle|line, walkers? (≤ 5000), seed?, horizon? (steps, 30), speed?, readouts }. Exact: dist(s) at step t, stat(s) stationary (or long-run average from start), absorb(s) P(end in s), expDuration; played: emp(s) share of walkers at s now, hit(s) share ending in s, duration (mean steps to absorption), absorbed (share absorbed by t), walkers; prob(a, b); s = name or index. Variables: step = t, steps, done. stat, absorb, hit, prob, expDuration, duration are fixed (fine for expect). Expressions: as in function-plot.`,
+    example: {
+      states: ["a", "b", "c", "d"],
+      edges: [
+        { from: "b", to: "a", p: 0.5 },
+        { from: "b", to: "c", p: 0.5 },
+        { from: "c", to: "b", p: 0.5 },
+        { from: "c", to: "d", p: 0.5 },
+      ],
+      start: "b",
+      layout: "line",
+      walkers: 600,
+      readouts: { atA: { expr: "absorb('a')", digits: 3 }, atD: { expr: "absorb('d')", digits: 3 } },
     },
   },
 } as const;

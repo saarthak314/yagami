@@ -1,7 +1,8 @@
 // Shared pieces for template components: parameter environments, defs, readouts, ticks.
 
 import type { DemoProps, Params } from "../../types";
-import { axes, randn } from "../kit";
+import { axes, draw, randn, theme } from "../kit";
+import { LABEL_FONT } from "./ui";
 import { compile, compileField, evalNum, num, type Compiled, type Env, type Value } from "./expr";
 import type { ReadoutDef } from "./configs";
 
@@ -140,6 +141,36 @@ export const textWidth = (ctx: CanvasRenderingContext2D, s: string, font = '11px
 
 export { num };
 
+/** Word-wrap `s` into at most `maxLines` lines of `maxWidth` px (the last one shortened with "…"). */
+export function wrapText(ctx: CanvasRenderingContext2D, s: string, maxWidth: number, font: string, maxLines = 2): string[] {
+  const words = s.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    const next = cur ? `${cur} ${w}` : w;
+    if (cur && textWidth(ctx, next, font) > maxWidth) {
+      lines.push(cur);
+      cur = w;
+    } else cur = next;
+  }
+  if (cur) lines.push(cur);
+  if (lines.length > maxLines) {
+    lines.length = maxLines;
+    lines[maxLines - 1] += "…";
+  }
+  return lines.map((l) => {
+    let t = l;
+    while (t.length > 4 && textWidth(ctx, t, font) > maxWidth) t = `${t.slice(0, -2)}…`;
+    return t;
+  });
+}
+
+/** Draw a step's explanation centred at y (wrapped to two lines). */
+export function drawNote(ctx: CanvasRenderingContext2D, s: string, width: number, y: number, maxLines = 2) {
+  const font = LABEL_FONT.replace("11px", "12px");
+  wrapText(ctx, s, width - 32, font, maxLines).forEach((l, i) => draw.text(ctx, l, width / 2, y + i * 16, { align: "center", color: theme.fg, size: 12 }));
+}
+
 // ---------------------------------------------------------------------------
 // Plot frames (shared by calculus-plot and parametric-plot)
 // ---------------------------------------------------------------------------
@@ -220,6 +251,12 @@ export function extent(values: number[], fallback: [number, number] = [0, 1]): [
   if (hi === lo) return [lo - (Math.abs(lo) || 1) * 0.5, hi + (Math.abs(hi) || 1) * 0.5];
   return [lo, hi];
 }
+
+/** How long a step-through holds its final state before it replays (long enough to read and check it). */
+export const END_HOLD = 30;
+
+/** Steps per second so a step-through of `count` steps finishes in about 10 s (at least 1 step/s). */
+export const autoPace = (count: number) => Math.max(1, (count - 1) / 10);
 
 /** A shared loop clock for step animations: elapsed steps with a hold at the end, then repeat. */
 export function stepIndex(t: number, count: number, perSecond: number, hold = 1.6): number {

@@ -4,6 +4,7 @@
 import type { Library } from "../types";
 import { THEMES, type ThemeId } from "../theme/themes";
 import { isNumbered, planFor } from "./data";
+import { cleanTitle, searchable } from "./titles";
 
 export interface Target {
   book: string;
@@ -23,12 +24,18 @@ export interface SearchItem {
   hay: string;
   /** For "Theme" items: the theme to switch to. */
   theme?: ThemeId;
+  /** For demos verify flagged: the one-line reason (shown as a quiet "may be inaccurate" mark). */
+  flagged?: string;
 }
+
+/** Lower case, curly quotes straightened: "Adam’s" matches a typed "adam's". */
+const fold = (s: string) => s.toLowerCase().replace(/[’‘]/g, "'").replace(/[“”]/g, '"');
 
 export function searchIndex(lib: Library): SearchItem[] {
   const items: SearchItem[] = [];
-  const add = (kind: SearchItem["kind"], title: string, context: string, target: Target) =>
-    items.push({ kind, title, context, target, hay: `${title} ${context}`.toLowerCase() });
+  // `extra`: more text to match (a section title's small-caps-joined form, a demo's captions).
+  const add = (kind: SearchItem["kind"], title: string, context: string, target: Target, extra = "", flagged?: string) =>
+    items.push({ kind, title, context, target, hay: fold(`${title} ${context} ${extra}`), ...(flagged ? { flagged } : {}) });
 
   for (const b of lib.books) {
     add("Book", b.title, b.subtitle ?? "", { book: b.slug });
@@ -37,10 +44,12 @@ export function searchIndex(lib: Library): SearchItem[] {
       const where = multi ? `${b.short} · ${isNumbered(u.id) ? u.id : u.title}` : b.short;
       if (multi) add("Chapter", isNumbered(u.id) ? `${u.id}. ${u.title}` : u.title, b.short, { book: b.slug, unit: u.id });
       for (const s of u.sections) {
-        add("Section", isNumbered(s.id) ? `${s.id} ${s.title}` : s.title, where, { book: b.slug, unit: u.id, section: s.id });
+        const title = cleanTitle(s.title);
+        add("Section", isNumbered(s.id) ? `${s.id} ${title}` : title, where, { book: b.slug, unit: u.id, section: s.id }, searchable(s.title));
       }
       for (const d of planFor(`${b.slug}/${u.id}`)?.demos ?? []) {
-        add("Demo", d.title, where, { book: b.slug, unit: u.id, anchor: d.beats[0]?.anchor });
+        const captions = d.beats.map((x) => x.caption).join(" ");
+        add("Demo", d.title, where, { book: b.slug, unit: u.id, anchor: d.beats[0]?.anchor }, captions, d.flagged);
       }
     }
   }
@@ -50,13 +59,13 @@ export function searchIndex(lib: Library): SearchItem[] {
 
 /** Items matching every word of `query`, best first. `near` (book/unit) ranks the current place higher. */
 export function search(items: SearchItem[], query: string, near?: { book: string; unit?: string }): SearchItem[] {
-  const q = query.trim().toLowerCase();
+  const q = fold(query.trim());
   const words = q.split(/\s+/).filter(Boolean);
   const kindRank = { Demo: 0, Section: 1, Chapter: 2, Book: 3, Theme: 4 } as const;
   const scored = items
     .filter((it) => (it.kind !== "Theme" || words.length > 0) && words.every((w) => it.hay.includes(w)))
     .map((it) => {
-      const t = it.title.toLowerCase();
+      const t = fold(it.title);
       let score = 0;
       if (q && t.startsWith(q)) score -= 30;
       else if (q && t.includes(q)) score -= 20;

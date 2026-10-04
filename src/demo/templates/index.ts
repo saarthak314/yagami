@@ -23,6 +23,10 @@ const LOADERS: Record<string, Loader> = {
   "heap-allocator": () => import("./HeapAllocator") as unknown as Promise<{ default: TemplateComponent }>,
   "attention-heads": () => import("./AttentionHeads") as unknown as Promise<{ default: TemplateComponent }>,
   "layer-stack": () => import("./LayerStack") as unknown as Promise<{ default: TemplateComponent }>,
+  "message-sequence": () => import("./MessageSequence") as unknown as Promise<{ default: TemplateComponent }>,
+  "hash-chain": () => import("./HashChain") as unknown as Promise<{ default: TemplateComponent }>,
+  "state-machine": () => import("./StateMachine") as unknown as Promise<{ default: TemplateComponent }>,
+  "markov-chain": () => import("./MarkovChain") as unknown as Promise<{ default: TemplateComponent }>,
 };
 
 const cache = new Map<string, TemplateComponent>();

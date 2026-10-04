@@ -2,14 +2,17 @@
 // born-digital PDFs, from `pdftotext -bbox-layout` word boxes. No OCR, no model.
 //
 // Per page:
-//   1. Lines from the text layer; drop rotated text (arXiv watermark), page numbers.
+//   1. Lines from the text layer; drop rotated text (arXiv watermark), page numbers, and running
+//      heads/footers (margin lines that recur across the unit's pages). Small caps are rejoined.
 //   2. Columns: two-column when most body lines sit wholly in the left or right
 //      half. Full-width lines (title, wide captions) split the page into bands;
 //      reading order is band by band, left column then right within a band.
 //   3. Figures/tables: a "Figure N:" / "Table N:" caption claims the graphics
 //      region next to it (lines that aren't prose, refined with the page's ink).
 //   4. The remaining lines become headings (numbered, checked against the running
-//      section number; or unnumbered like Abstract/References in a larger font),
+//      section number, seeded by "Chapter N" or a unit's first heading, never on a table-of-contents
+//      page nor from numbered list items; or unnumbered like Abstract/References in a larger font;
+//      exercise/problem sections get "exercises-…" ids, a contents page "contents"),
 //      display equations (centred, or with an "(n)" tag at the right edge),
 //      footnotes (small type at the foot of the page) and prose paragraphs
 //      (split on extra vertical space or a first-line indent).
@@ -71,11 +74,26 @@ export function parsePages(pdf: string, first: number, last: number): { width: n
         .map((w) => ({ l: +w[1], t: +w[2], r: +w[3], b: +w[4], text: decode(w[5]) }))
         // Rotated text (axis labels, token strips in figures, the arXiv watermark) reads as tall narrow words.
         .filter((w) => !(w.text.length >= 3 && w.b - w.t > 1.5 * (w.r - w.l)));
-      if (words.length) lines.push(words);
+      if (words.length) lines.push(...splitAtGutter(words, +pm[1]));
     }
     pages.push({ width: +pm[1], height: +pm[2], lines });
   }
   return pages;
+}
+
+/**
+ * The text layer sometimes runs a left-column line on into the right column's ("…allows it to
+ * 5 Conclusion"): split a line at a wide gap that straddles the middle of the page.
+ */
+function splitAtGutter(words: Word[], width: number): Word[][] {
+  const ws = [...words].sort((a, b) => a.l - b.l);
+  const h = median(ws.map((w) => w.b - w.t));
+  for (let i = 1; i < ws.length; i++) {
+    const [a, b] = [ws[i - 1], ws[i]];
+    if (b.l - a.r > 0.8 * h && a.r < 0.58 * width && b.l > 0.42 * width && Math.max(a.r, 0.45 * width) < Math.min(b.l, 0.55 * width))
+      return [ws.slice(0, i), ...splitAtGutter(ws.slice(i), width)];
+  }
+  return [words];
 }
 
 const median = (xs: number[]) => {
@@ -88,8 +106,40 @@ const quantile = (xs: number[], q: number) => {
   return s[Math.min(s.length - 1, Math.max(0, Math.floor(q * (s.length - 1))))];
 };
 
+/**
+ * Small caps come out of the text layer split at the size change ("I NTRODUCTION",
+ * "T HE D ISCRETE S OURCE OF I NFORMATION"): rejoin a capital with the smaller all-caps run
+ * that touches it on the same baseline, and lower-case the small-cap letters.
+ */
+function joinSmallCaps(words: Word[]): Word[] {
+  const caps = (w: Word) => /^[A-Z][A-Z’'\-]*$/.test(w.text);
+  const h = (w: Word) => w.b - w.t;
+  const out: Word[] = [];
+  let capH = 0;
+  for (const w of words) {
+    const p = out[out.length - 1];
+    if (
+      p &&
+      /[A-Z]$/.test(p.text) &&
+      caps(w) &&
+      w.l - p.r < 0.08 * h(p) &&
+      w.l - p.r > -0.5 &&
+      h(w) < 0.92 * h(p) &&
+      Math.abs(w.b - p.b) < 0.15 * h(p)
+    ) {
+      capH = Math.max(capH, h(p));
+      out[out.length - 1] = { ...p, r: w.r, text: p.text + w.text.toLowerCase() };
+    } else out.push({ ...w });
+  }
+  if (!capH) return words;
+  // Whole words set in small caps ("OF", "AND") read as lower case too.
+  for (const w of out) if (caps(w) && h(w) < 0.92 * capH) w.text = w.text.toLowerCase();
+  return out;
+}
+
 function makeLine(words: Word[]): Omit<Line, "column" | "seg"> {
   words.sort((a, b) => a.l - b.l);
+  words = joinSmallCaps(words);
   let maxGap = 0;
   for (let i = 1; i < words.length; i++) maxGap = Math.max(maxGap, words[i].l - words[i - 1].r);
   return {
@@ -151,6 +201,9 @@ function mergeRows(lines: Omit<Line, "column" | "seg">[], layout: Layout, width:
       if (overlap < 0.6 * Math.min(o.b - o.t, ln.b - ln.t)) return false;
       if (Math.max(o.fh, ln.fh) > 1.4 * Math.min(o.fh, ln.fh) && ln.words.length > 1 && o.words.length > 1) return false;
       if (layout.twoCol && (o.r < layout.mid) !== (ln.r < layout.mid) && (o.l > layout.mid) !== (ln.l > layout.mid)) return false;
+      // A left-column line that pokes just past the middle (a wide caption) and a right-column line.
+      const [lo, hi] = o.l < ln.l ? [o, ln] : [ln, o];
+      if (layout.twoCol && hi.l > layout.mid && lo.r < layout.mid + 0.03 * width && lo.l < layout.mid - 0.2 * width) return false;
       const gap = Math.max(ln.l - o.r, o.l - ln.r);
       return gap < 0.3 * width;
     });
@@ -162,7 +215,51 @@ function mergeRows(lines: Omit<Line, "column" | "seg">[], layout: Layout, width:
 
 // --- page reading order -------------------------------------------------------------
 
-export function readPage(page: { width: number; height: number; lines: Word[][] }, pdfPage: number): { text: PageText; layout: Layout } {
+/** Margin zones where running heads, footers and page numbers live. */
+const inHeadZone = (l: Box, height: number) => l.b < 0.15 * height;
+const inFootZone = (l: Box, height: number) => l.t > 0.9 * height;
+/** Letters of a margin line, for matching running heads across pages ("230 A. M. TURING [Nov. 12," → "amturingnov"). */
+const marginKey = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
+/** "1 Introduction", "2 Towards Reducing Internal": a numbered heading, which may sit high on the page. */
+const NUMBERED_HEAD = /^(?:\d+\.)*\d+\.?\s+[A-Z][a-z]/;
+
+function editDistance(a: string, b: string): number {
+  if (Math.abs(a.length - b.length) > 3) return 99;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+/**
+ * Running heads/footers of a run of pages: margin lines whose letters recur on other pages
+ * ("1936.] ON COMPUTABLE NUMBERS.", "Chapter 20 Random Walks"); OCR'd scans spell them
+ * slightly differently from page to page, so near matches count.
+ */
+export function runningHeads(pages: { width: number; height: number; lines: Word[][] }[]): Set<string> {
+  const keys = pages.map((p) => {
+    const lines = readPage(p, 0).text.lines;
+    return [...new Set(lines.filter((l) => inHeadZone(l, p.height) || inFootZone(l, p.height)).map((l) => marginKey(l.text)).filter((k) => k.length >= 6))];
+  });
+  const out = new Set<string>();
+  if (pages.length < 3) return out;
+  keys.forEach((ks, i) => {
+    for (const k of ks) {
+      const near = (o: string) => o === k || (k.length >= 10 && editDistance(o, k) <= 2);
+      if (keys.some((other, j) => j !== i && other.some(near))) out.add(k);
+    }
+  });
+  return out;
+}
+
+export function readPage(
+  page: { width: number; height: number; lines: Word[][] },
+  pdfPage: number,
+  running?: Set<string>,
+): { text: PageText; layout: Layout } {
   // Drop rotated / margin text (arXiv watermark) and empty lines.
   let raw = page.lines
     .map(makeLine)
@@ -172,7 +269,19 @@ export function readPage(page: { width: number; height: number; lines: Word[][] 
   const layout = detectLayout(raw, page.width);
   // Page numbers / running footers, and running headers in the top margin (e.g. ACM "Paper Session: …").
   raw = raw.filter((l) => !(/^\d{1,3}$/.test(l.text.trim()) && (l.t > 0.9 * page.height || l.b < 0.08 * page.height)));
-  raw = raw.filter((l) => l.b > 0.07 * page.height);
+  if (running) {
+    // Recurring margin lines, and page numbers sitting in the head/foot margin.
+    raw = raw.filter(
+      (l) =>
+        !(
+          (inHeadZone(l, page.height) || inFootZone(l, page.height)) &&
+          // (a chapter's own heading can repeat as its running head, but in larger type)
+          ((running.has(marginKey(l.text)) && l.fh < 1.05 * layout.bodyFh) || /^\d{1,4}$/.test(l.text.trim()))
+        ),
+    );
+    // The top 7% is margin, unless a numbered heading starts a column there (tight-margin layouts).
+    raw = raw.filter((l) => l.b > 0.07 * page.height || (NUMBERED_HEAD.test(l.text.trim()) && l.fh > 1.1 * layout.bodyFh));
+  } else raw = raw.filter((l) => l.b > 0.07 * page.height);
 
   const lines: Line[] = [];
   if (!layout.twoCol) {
@@ -320,10 +429,21 @@ export async function textAnchors(book: BookConfig, unitId: string): Promise<voi
   /** Past the References heading: unnumbered Title Case lines are appendix headings. */
   let afterRefs = false;
   let bodyFhUnit = 0;
+  /** Front matter ended without a heading: a run of body prose (e.g. an unnumbered introduction). */
+  let bodyStarted = false;
+  /** Top of the first heading on the unit's first page: larger type above it is the author block. */
+  let firstHeadTop = Infinity;
+  const running = runningHeads(parsed);
+  /** Current section id (headings only). */
+  let curSection = "";
+
+  const read = parsed.map((p, i) => readPage(p, pdfPages[i], running));
+  /** Body type size across the unit (a page that is all figure, like a boxed summary, reads smaller). */
+  const unitFh = median(read.map((r) => r.layout.bodyFh).filter((x) => x > 0));
 
   for (const [pi, pdfPage] of pdfPages.entries()) {
     const pageStart = drafts.length;
-    const { text: page, layout } = readPage(parsed[pi], pdfPage);
+    const { text: page, layout } = read[pi];
     const ink = await loadInk(book.slug, pdfPage);
     // Hidden text (invisible labels, text under images): no ink under it, or it overlaps a
     // visible line whose ink is denser.
@@ -370,6 +490,18 @@ export async function textAnchors(book: BookConfig, unitId: string): Promise<voi
         (l.fh > 1.12 * fh && l.words.length <= 8 && /^[A-Z]/.test(t) && !/[.,;:]$/.test(t) && /^[A-Za-z][A-Za-z\s\-:]*$/.test(t))
       );
     };
+
+    // A table of contents ("1 Introduction .... 3"): its entries are not headings.
+    const tocEntries = page.lines.filter((l) => /(\.\s*){3,}\s*\d+$|^(?:\d+\.)*\d+\.?\s+[A-Z][a-z]{2,}.*\s\d{1,3}$/.test(l.text.trim())).length;
+    const tocPage = tocEntries >= 4 || page.lines.some((l) => /^(table of )?contents$/i.test(l.text.trim()));
+    // Front matter ends at the first run of body prose, even without a heading.
+    let bodyFrom = Infinity;
+    if (!seenHeading && !bodyStarted && !tocPage)
+      for (let k = 0; k + 4 < page.lines.length && bodyFrom === Infinity; k++) {
+        const run = page.lines.slice(k, k + 5);
+        if (run.every((l) => l.seg === run[0].seg && proseLike(l) && Math.abs(l.fh - fh) < 0.1 * fh) && run.slice(1).every((l, i) => l.t - run[i].b < 0.8 * fh))
+          bodyFrom = k;
+      }
 
     // Group lines by segment (a column within a band) in reading order.
     const segs = new Map<number, Line[]>();
@@ -467,7 +599,15 @@ export async function textAnchors(book: BookConfig, unitId: string): Promise<voi
     const now = (): Draft | null => cur;
     const curKind = (): Kind | null => now()?.kind ?? null;
 
-    for (const l of page.lines) {
+    /** Lines already used (the second line of a wrapped heading, the title after "Chapter 5"). */
+    const used2 = new Set<Line>();
+    const nextInSeg = (l: Line) => {
+      const k = page.lines.indexOf(l) + 1;
+      return k < page.lines.length && page.lines[k].seg === l.seg ? page.lines[k] : null;
+    };
+    for (const [li, l] of page.lines.entries()) {
+      if (li === bodyFrom) bodyStarted = true;
+      if (used2.has(l)) continue;
       if (prevLine && prevLine.seg !== l.seg) close();
       if (zoneDrafts.has(l)) {
         close();
@@ -495,32 +635,93 @@ export async function textAnchors(book: BookConfig, unitId: string): Promise<voi
         return /[A-Za-z]{3,}/.test(t) && letters >= 0.5 * chars.length;
       };
       const num = numM && titleHasWords(numM[2]) ? numM : null;
+      const next = nextInSeg(l);
+      // Numbered list items and sentences that happen to start with a number: indented, a full
+      // sentence inside ("8. This completes the contradiction. Thus, …"), or a full-width line that
+      // runs on into the next one.
+      // (A heading set large may wrap: "3.1 Training and Inference with Batch-" / "Normalized Networks".)
+      const large = l.fh > 1.1 * fh;
+      const centredHead = Math.abs(centre - (c.l + c.r) / 2) < 0.05 * colW && l.l > c.l + fh;
+      const listItem =
+        num !== null &&
+        ((l.l > c.l + 0.5 * fh && !centredHead) ||
+          /[a-z][.!?]\s+[A-Z]/.test(num[2]) ||
+          (!large && /[-,]$/.test(num[2])) ||
+          (!large && l.r > c.r - 0.02 * colW && /[a-z,]$/.test(txt) && !!next && next.t - l.b < 0.5 * fh && Math.abs(next.fh - l.fh) < 0.1 * fh));
+      // "1. Computing machines." (old style): a numbered title may end with a full stop.
+      const periodTitle = num !== null && !listItem && /[A-Za-z]\.$/.test(txt) && num[2].split(/\s+/).length <= 10 && (l.r - l.l < 0.85 * colW || centredHead);
       // Numbered headings can run nearly the full column width ("3 MALLOC PROGRAMMING LAB OVERVIEW").
       const short = (l.r - l.l < 0.85 * colW || (num !== null && txt.length <= 70)) && !/[.,;]$/.test(txt);
+      const bare = txt.replace(/\.$/, "");
       let heading: { id: string; title: string } | null = null;
-      if (num && short && gapAbove > 0.3 * fh) {
+      const tidy = (t: string) => t.replace(/\s+([:,;’])/g, "$1").replace(/’\s+/g, "’").replace(/(\w) - (\w)/g, "$1-$2").replace(/\.$/, "").trim();
+      if (num && !listItem && !tocPage && (short || periodTitle) && gapAbove > 0.3 * fh) {
         const parts = num[1].split(".").map(Number);
-        if (successor(lastNum, parts)) {
-          heading = { id: num[1], title: num[2].trim() };
+        // A top-level heading set large re-synchronises the numbering after a missed or bogus one.
+        const strong = l.fh > 1.1 * fh && gapAbove > 0.8 * fh && parts.length === 1 && l.words.length <= 10;
+        const resync = strong && lastNum.length > 0 && parts[0] > lastNum[0] && parts[0] <= lastNum[0] + 2;
+        // A unit that starts inside a chapter ("3.1 Encoder and Decoder Stacks"): its first numbered
+        // heading seeds the numbering.
+        const seed = !lastNum.length && parts.length > 1 && l.l <= c.l + 0.5 * fh && gapAbove > 0.6 * fh && num[2].split(/\s+/).length <= 10 && short;
+        if (successor(lastNum, parts) || resync || seed) {
+          heading = { id: num[1], title: tidy(num[2]) };
           lastNum = parts;
         }
       }
-      if (!heading && short && txt.length < 60 && afterRefs && !/^\[\d/.test(txt) && TITLE_CASE.test(txt) && gapAbove > 0.5 * fh) {
+      // "Chapter 5" over the chapter title: the chapter number seeds the section numbering.
+      const chap = /^chapter\s+(\d+)$/i.exec(txt);
+      if (!heading && chap && !tocPage && next && next.t - l.b < 4 * fh && next.words.length <= 10 && !/[.,;:]$/.test(next.text.trim())) {
+        heading = { id: chap[1], title: tidy(next.text.trim()) };
+        lastNum = [Number(chap[1])];
+        used2.add(next);
+      }
+      if (!heading && tocPage && /^(table of )?contents$/i.test(txt)) heading = { id: "contents", title: "Contents" };
+      // Lettered appendix sections ("A. Object Detection Baselines").
+      const appM = /^([A-H])\.\s+([A-Z][a-z].{2,80})$/.exec(txt);
+      if (!heading && appM && afterRefs && !tocPage && short && l.fh > 1.1 * fh && gapAbove > 0.5 * fh) heading = { id: appM[1], title: tidy(appM[2]) };
+      if (!heading && !tocPage && short && txt.length < 60 && afterRefs && !/^\[\d/.test(txt) && TITLE_CASE.test(txt) && titleHasWords(txt) && gapAbove > 0.5 * fh) {
         heading = { id: slugify(txt), title: txt };
       }
-      if (!heading && short && txt.length < 60 && (HEADING_WORDS.test(txt) || (l.fh > 1.12 * fh && seenHeading && gapAbove > 0.5 * fh && /^[A-Z][A-Za-z\s\-:]*$/.test(txt)))) {
-        heading = { id: slugify(txt), title: txt };
+      // Larger type, but not the author block ("Christian Szegedy" / "Google Inc., szegedy@google.com").
+      const authorish =
+        (pi === 0 && l.b < firstHeadTop) || (!!next && next.t - l.b < 1.5 * fh && /@|\b(Inc|Universit|Institut|Laborator|College|Research|Google|Microsoft)/.test(next.text));
+      if (
+        !heading &&
+        !tocPage &&
+        (short || (HEADING_WORDS.test(bare) && l.r - l.l < 0.5 * colW)) &&
+        txt.length < 60 &&
+        (HEADING_WORDS.test(bare) || (l.fh > 1.12 * Math.max(fh, unitFh) && seenHeading && gapAbove > 0.5 * fh && /^[A-Z][A-Za-z\s\-:]*$/.test(txt) && !authorish))
+      ) {
+        heading = { id: slugify(bare), title: bare };
       }
+      // Exercise/problem sections ("Problems for Section 20.1", "5.4 Discussion and Exercises"):
+      // ids start "exercises-" so the planner can leave them out.
+      const exM = /^(?:exercises|problems|problem set|homework(?: problems)?)(?:\s+for\s+(?:section|chapter)\s+([\d.]+))?$/i.exec(txt);
+      if (!tocPage && exM && (!heading || heading.id === slugify(txt)) && gapAbove > 0.5 * fh) heading = { id: `exercises-${exM[1] ?? (lastNum.join(".") || "0")}`, title: txt };
+      else if (heading && /^[\d.]+$/.test(heading.id) && /\b(exercises|problems)$/i.test(heading.title)) heading = { ...heading, id: `exercises-${heading.id}` };
+      // "Homework Problems" inside "Problems for Section 20.2" is part of it.
+      if (heading && exM && !exM[1] && curSection.startsWith("exercises-")) heading = null;
       if (heading) {
         seenHeading = true;
+        curSection = heading.id;
+        if (pi === 0) firstHeadTop = Math.min(firstHeadTop, l.t);
         if (heading.id === "references" || heading.id === "bibliography") afterRefs = true;
         start("heading", l, { section: heading.id, title: heading.title });
+        // A heading set large that wraps onto a second line ("3 Normalization via Mini-Batch" / "Statistics").
+        if (next && l.fh > 1.1 * fh && Math.abs(next.fh - l.fh) < 0.1 * fh && next.t - l.b < 0.7 * fh && next.words.length <= 8 && !/[.,;:]$/.test(next.text.trim()) && !NUMBERED_HEAD.test(next.text.trim()) && !used2.has(next)) {
+          const d = now()!;
+          d.box = unionBox(d.box, next);
+          d.lines.push(next.text);
+          const t2 = next.text.trim();
+          d.title = /-$/.test(d.title!) ? (/^[a-z]/.test(t2) ? d.title!.slice(0, -1) + t2 : d.title + t2) : `${d.title} ${t2}`;
+          used2.add(next);
+        }
         close();
         continue;
       }
 
       // Front matter: everything before the first heading (title, authors, notices).
-      if (!seenHeading) {
+      if (!seenHeading && !bodyStarted) {
         if (curKind() === "other" && gapAbove < 1.6 * fh) add(l);
         else start("other", l);
         continue;
@@ -560,7 +761,19 @@ export async function textAnchors(book: BookConfig, unitId: string): Promise<voi
       const isRef = /^\[\d+\]/.test(txt);
       const linePitch = samePrev ? l.b - samePrev.b : Infinity;
       const breaks = !samePrev || linePitch > 1.3 * pitch || (isRef && inRefs) || (!inRefs && indent && (prevShort || gapAbove > 0.25 * fh));
-      if (!breaks && curKind() === "para") add(l);
+      // A paragraph that would fill most of a column splits at a sentence end (finer anchors): at the
+      // end of the line above, or inside it (the new paragraph then starts on that line).
+      const tooTall = !!curPara && !!samePrev && l.b - curPara.box.t > 0.33 * page.height;
+      const prevTxt = samePrev?.text.trim() ?? "";
+      const cut = tooTall && !/[.!?]$/.test(prevTxt) ? [...prevTxt.matchAll(/[.!?]\s+(?=[A-Z])/g)].pop() : undefined;
+      if (!breaks && curPara && cut && cut.index! > 0 && curPara.lines[curPara.lines.length - 1] === samePrev!.text) {
+        curPara.lines[curPara.lines.length - 1] = prevTxt.slice(0, cut.index! + 1);
+        start("para", samePrev!);
+        now()!.lines = [prevTxt.slice(cut.index! + cut[0].length)];
+        add(l);
+        continue;
+      }
+      if (!breaks && !(tooTall && /[.!?]$/.test(prevTxt)) && curKind() === "para") add(l);
       else if (!breaks && cont) cont.lines.push(l.text);
       else if (!samePrev && !cur && !indent && !isRef && openPara(drafts)) {
         // Top of a new column/page continuing the previous paragraph: the text joins it,
@@ -589,6 +802,8 @@ export async function textAnchors(book: BookConfig, unitId: string): Promise<voi
   const used = new Set<string>();
   const toPx = (b: Box): Box => ({ l: b.l * PX, t: b.t * PX, r: b.r * PX, b: b.b * PX });
   for (const d of drafts) {
+    // Stray chart tick labels and end-of-proof marks are not paragraphs.
+    if (d.kind === "para" && d.lines.length === 1 && /^(\d{1,4}(\.\d+)?%?|[□∎■])$/.test(d.lines[0].trim())) continue;
     if (d.kind === "heading") {
       let id = d.section!;
       for (let k = 2; used.has(`${id}-h`); k++) id = `${d.section}-${k}`;

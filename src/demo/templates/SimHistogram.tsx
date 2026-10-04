@@ -10,12 +10,22 @@ import { applyDefs, compileDefs, compileReadouts, fmtTick, logTicks, niceTicks, 
 
 const HOLD = 2; // seconds the full histogram stays up before the run repeats
 const MAX_TRIALS = 20000;
+const PROCESS_BUDGET = 3_000_000; // process steps over all trials
 
 export default function SimHistogram({ config, params, preset, playing, resetKey, width, height, setReadouts }: TemplateProps<SimHistogramConfig>) {
   const c = useMemo(
     () => ({
       defs: compileDefs(config.defs),
-      trial: compile(config.trial),
+      trial: config.trial !== undefined ? compile(config.trial) : null,
+      process: config.process
+        ? {
+            init: Object.entries(config.process.init).map(([k, v]) => [k, opt(v)!] as const),
+            step: Object.entries(config.process.step).map(([k, v]) => [k, compile(v)] as const),
+            until: config.process.until ? compile(config.process.until) : null,
+            maxSteps: opt(config.process.maxSteps),
+            result: compile(config.process.result),
+          }
+        : null,
       trials: opt(config.trials)!,
       bins: config.bins && config.bins !== "integer" ? { min: opt(config.bins.min)!, max: opt(config.bins.max)!, count: config.bins.count, log: !!config.bins.log } : config.bins,
       expected: config.expected ? compile(config.expected) : undefined,
@@ -32,14 +42,36 @@ export default function SimHistogram({ config, params, preset, playing, resetKey
     const fns = randomFns(next);
     const total = Math.max(1, Math.min(MAX_TRIALS, Math.round(val(c.trials, env))));
     const tEnv = { ...env, ...fns };
-    const results = Array.from({ length: total }, () => val(c.trial, tEnv));
+    const p = c.process;
+    let budget = PROCESS_BUDGET;
+    const playOnce = (): number => {
+      // A multi-step process: state variables updated together each step until `until` holds.
+      const s: Env = { ...tEnv, k: 0 };
+      for (const [name, v] of p!.init) s[name] = val(v, s);
+      const cap = Math.max(1, Math.min(100000, Math.round(p!.maxSteps !== undefined ? val(p!.maxSteps, s) : 1000)));
+      let k = 0;
+      while (k < cap && budget > 0 && !(p!.until && val(p!.until, s))) {
+        const next = p!.step.map(([name, e]) => [name, val(e, s)] as const);
+        for (const [name, v] of next) s[name] = v;
+        s.k = ++k;
+        budget--;
+      }
+      return val(p!.result, s);
+    };
+    const results: number[] = [];
+    for (let i = 0; i < total && (!p || budget > 0); i++) results.push(p ? playOnce() : val(c.trial ?? undefined, tEnv));
     const finite = results.filter(Number.isFinite);
-    const integer = c.bins === "integer" || (c.bins === undefined && finite.every((v) => Number.isInteger(v)));
+    const cats = config.categories?.length ?? 0;
+    const integer = cats > 0 || c.bins === "integer" || (c.bins === undefined && finite.every((v) => Number.isInteger(v)));
     let lo: number;
     let hi: number;
     let count: number;
     const log = !integer && !!c.bins && c.bins !== "integer" && c.bins.log;
-    if (integer) {
+    if (cats) {
+      lo = 0;
+      hi = cats - 1;
+      count = cats;
+    } else if (integer) {
       lo = Math.min(...finite);
       hi = Math.max(...finite);
       count = hi - lo + 1;
@@ -55,7 +87,7 @@ export default function SimHistogram({ config, params, preset, playing, resetKey
     if (log) lo = Math.max(1e-9, lo);
     if (!(hi > lo)) hi = log ? lo * 10 : lo + 1;
     count = Math.max(1, Math.min(60, count));
-    return { env, results, integer, lo, hi, count, total, log };
+    return { env, results, integer, lo, hi, count, total: results.length, log };
   }, [c, paramsKey, config.seed]); // params enter through paramsKey
 
   const perSecond = config.perSecond ?? Math.max(20, run.total / 5);
@@ -116,7 +148,7 @@ export default function SimHistogram({ config, params, preset, playing, resetKey
           xDomain: log ? [0, 1] : [integer ? lo - 0.5 : lo, integer ? hi + 0.5 : hi],
           yDomain: [0, top],
           yTicks,
-          xTicks: log ? [] : xTickVals,
+          xTicks: log || config.categories?.length ? [] : xTickVals,
           xFormat: (v) => fmtTick(v, xTickVals),
           yFormat: (v) => fmtTick(v, yTicks),
           grid: true,
@@ -138,6 +170,7 @@ export default function SimHistogram({ config, params, preset, playing, resetKey
           for (const [x, y] of pts) draw.dot(ctx, x, y, 2.5, theme.accent);
           draw.text(ctx, "expected", box.left + box.width - 2, box.top + 4, { color: theme.accent, align: "right" });
         }
+        config.categories?.forEach((name, b) => draw.text(ctx, name, binX(b), box.top + box.height + 14, { kind: "mono", align: "center", color: theme.muted }));
         if (config.xLabel) draw.text(ctx, config.xLabel, box.left + box.width / 2, box.top + box.height + 30, { kind: "label", align: "center", color: theme.muted });
         draw.text(ctx, `${sample.length} trials`, box.left + 6, box.top + 4, { kind: "mono", color: theme.muted });
 

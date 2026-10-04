@@ -4,11 +4,11 @@
 import { useMemo } from "react";
 import { draw, rng, theme, useSim } from "../kit";
 import { Stage } from "./stage";
-import type { Algorithm, AlgorithmStepsConfig } from "./configs";
-import { applyDefs, compileDefs, compileReadouts, opt, paramEnv, readoutValues, textWidth, val, type TemplateProps } from "./runtime";
+import { foldRun, type Algorithm, type AlgorithmStepsConfig } from "./configs";
+import { END_HOLD, applyDefs, compileDefs, compileReadouts, opt, paramEnv, readoutValues, textWidth, val, type TemplateProps } from "./runtime";
 import { LABEL_FONT } from "./ui";
 
-const HOLD = 1.6; // seconds the last step stays up before the run repeats
+const HOLD = END_HOLD; // seconds the last step stays up before the run repeats
 
 interface Vars {
   comparisons: number;
@@ -32,6 +32,13 @@ interface ArrayStep {
   msg: string;
   vars: Vars;
 }
+interface FoldStep {
+  i: number;
+  acc: number;
+  line: number;
+  msg: string;
+  vars: Vars & { acc: number; x: number };
+}
 interface GraphStep {
   current: string | null;
   visited: string[];
@@ -52,7 +59,38 @@ const CODE: Record<Algorithm, string[]> = {
   "two-pointers": ["i = 0; j = n - 1;", "while (i < j) {", "  s = a[i] + a[j];", "  if (s == x) return (i, j);", "  if (s < x) i++; else j--;", "}", "return none;"],
   bfs: ["queue = [start]; seen = {start};", "while (queue not empty) {", "  u = queue.popFront();", "  for (v in adj[u])", "    if (v not in seen) {", "      seen.add(v); queue.push(v);", "    }", "}"],
   dfs: ["stack = [start];", "while (stack not empty) {", "  u = stack.pop();", "  if (u in seen) continue;", "  seen.add(u);", "  for (v in adj[u]) stack.push(v);", "}"],
+  fold: [],
 };
+
+/** fold: the listing (custom lines, or one written from the config) and the lines init / update / return highlight. */
+function foldCode(config: AlgorithmStepsConfig): { code: string[]; lines: [number, number, number] } {
+  const f = config.fold!;
+  const name = f.name ?? "h";
+  if (Array.isArray(config.code)) {
+    const n = config.code.length;
+    return { code: config.code, lines: f.lines ?? [0, Math.max(0, n - 2), n - 1] };
+  }
+  const elem = typeof f.input === "string" ? "s[i]" : "a[i]";
+  const step = f.step.replace(/\bacc\b/g, name).replace(/\bx\b/g, elem).replace(/\bch\b/g, elem);
+  return { code: [`${name} = ${f.init};`, "for (i = 0; i < n; i++)", `  ${name} = ${step};`, `return ${name};`], lines: f.lines ?? [0, 2, 3] };
+}
+
+function foldSteps(config: AlgorithmStepsConfig, env: Record<string, unknown>): FoldStep[] {
+  const f = config.fold!;
+  const name = f.name ?? "h";
+  const { xs, chars, accs } = foldRun(f, env as never);
+  const { lines } = foldCode(config);
+  const v = { ...blank(), acc: accs[0], x: NaN };
+  const steps: FoldStep[] = [{ i: -1, acc: accs[0], line: lines[0], msg: `${name} = ${accs[0]}`, vars: { ...v } }];
+  xs.forEach((x, i) => {
+    Object.assign(v, { i, acc: accs[i + 1], x });
+    const shown = typeof f.input === "string" ? `'${chars[i]}' = ${x}` : String(x);
+    steps.push({ i, acc: accs[i + 1], line: lines[1], msg: `i = ${i}: x = ${shown} → ${name} = ${accs[i + 1]}`, vars: { ...v } });
+  });
+  Object.assign(v, { done: 1, i: xs.length });
+  steps.push({ i: xs.length, acc: accs[xs.length], line: lines[2], msg: `return ${accs[xs.length]}`, vars: { ...v } });
+  return steps;
+}
 
 const blank = (): Vars => ({ comparisons: 0, swaps: 0, done: 0, found: -1, lo: -1, hi: -1, mid: -1, i: -1, j: -1, visited: 0, frontier: 0 });
 
@@ -314,15 +352,20 @@ export default function AlgorithmSteps({ config, params, preset, playing, resetK
   const graphAlg = config.algorithm === "bfs" || config.algorithm === "dfs";
   const run = useMemo(() => {
     const env = applyDefs(paramEnv(params), c.defs);
-    if (graphAlg) return { env, graph: graphSteps(config.algorithm as "bfs" | "dfs", config.graph!), arr: null, n: config.graph!.nodes.length };
+    if (config.algorithm === "fold" && config.fold) {
+      const fold = foldSteps(config, env);
+      return { env, graph: null, arr: null, fold, n: fold.length - 2, result: fold[fold.length - 1].acc };
+    }
+    if (graphAlg) return { env, graph: graphSteps(config.algorithm as "bfs" | "dfs", config.graph!), arr: null, fold: null, n: config.graph!.nodes.length, result: NaN };
     const sorted = config.algorithm === "binary-search" || config.algorithm === "two-pointers";
     const a = makeArray(config.array, env, sorted);
     const x = c.target !== undefined ? Math.round(val(c.target, env)) : a[0];
-    return { env, graph: null, arr: arraySteps(config.algorithm, a, x), n: a.length };
-  }, [c, paramsKey, config.algorithm, config.array, config.graph, graphAlg]); // params enter through paramsKey
+    return { env, graph: null, arr: arraySteps(config.algorithm, a, x), fold: null, n: a.length, result: NaN };
+  }, [c, paramsKey, config, graphAlg]); // params enter through paramsKey
 
   const sim = useSim(() => ({ t: 0 }), [resetKey, preset, paramsKey]);
-  const steps = run.graph ?? run.arr ?? [];
+  const steps = run.graph ?? run.arr ?? run.fold ?? [];
+  const listing = run.fold ? foldCode(config).code : Array.isArray(config.code) ? config.code : CODE[config.algorithm];
 
   return (
     <Stage
@@ -341,11 +384,29 @@ export default function AlgorithmSteps({ config, params, preset, playing, resetK
         if (!step) return;
 
         const showCode = config.code !== false && height >= 300;
-        const code = CODE[config.algorithm];
+        const code = listing;
         const codeH = showCode ? code.length * 17 + 8 : 0;
         const m = 22;
+        const codeW = Math.min(width - 2 * m, Math.max(290, ...code.map((l) => textWidth(ctx, l) + 60)));
+        const hl = (line: number) => (line >= 0 && line < code.length ? line : undefined);
 
-        if (run.arr) {
+        if (run.fold) {
+          const st = step as FoldStep;
+          const f = config.fold!;
+          const labels = typeof f.input === "string" ? [...f.input].slice(0, 16) : f.input.slice(0, 16).map(String);
+          const n = labels.length;
+          const cell = Math.min(44, (width - 2 * m) / n);
+          const blockH = 34 + cell + 16 + 70 + 26 + codeH;
+          const top = Math.max(m, (height - blockH) / 2);
+          const codes = typeof f.input === "string" ? labels.map((ch) => String(ch.codePointAt(0) ?? "")) : undefined;
+          const row = draw.cells(ctx, labels, { left: m, top: top + 34, width: width - 2 * m, height: cell + 16 }, { indices: codes ?? true, style: (i) => (i === st.i ? "active" : i < st.i ? "done" : "normal") });
+          if (st.i >= 0 && st.i < n) draw.pointer(ctx, row.x(st.i), row.top - 2, "i", { dir: "down", color: theme.accent });
+          const accY = row.top + row.height + 34;
+          draw.text(ctx, `${f.name ?? "h"} = ${st.acc}`, width / 2, accY, { kind: "mono", align: "center", size: 15, color: st.vars.done ? theme.accent : theme.fg });
+          const msgY = accY + 30;
+          drawMessage(ctx, st.msg, width, msgY);
+          if (showCode) draw.code(ctx, code, (width - codeW) / 2, msgY + 18, { lang: "c", highlight: hl(st.line), lineNumbers: true, width: codeW, lineHeight: 17 });
+        } else if (run.arr) {
           const st = step as ArrayStep;
           const n = st.a.length;
           const cell = Math.min(44, (width - 2 * m) / n);
@@ -361,7 +422,7 @@ export default function AlgorithmSteps({ config, params, preset, playing, resetK
           for (const [at, labels] of byCell) if (at >= 0 && at < n) draw.pointer(ctx, row.x(at), row.top + row.height + 18, labels.join(" = "), { color: theme.muted });
           const msgY = row.top + row.height + 18 + 44;
           drawMessage(ctx, st.msg, width, msgY);
-          if (showCode) draw.code(ctx, code, (width - 290) / 2, msgY + 18, { lang: "c", highlight: st.line, lineNumbers: true, width: 290, lineHeight: 17 });
+          if (showCode) draw.code(ctx, code, (width - codeW) / 2, msgY + 18, { lang: "c", highlight: hl(st.line), lineNumbers: true, width: codeW, lineHeight: 17 });
         } else {
           const st = step as GraphStep;
           const g = config.graph!;
@@ -391,10 +452,10 @@ export default function AlgorithmSteps({ config, params, preset, playing, resetK
           const name = config.algorithm === "bfs" ? "queue" : "stack";
           draw.text(ctx, `${name}: ${st.frontier.length ? st.frontier.join(" ") : "empty"}`, m, listY, { kind: "mono", color: theme.accent2 });
           drawMessage(ctx, st.msg, width, listY + 22);
-          if (showCode) draw.code(ctx, code, (width - 290) / 2, listY + 40, { lang: "c", highlight: st.line, lineNumbers: true, width: 290, lineHeight: 17 });
+          if (showCode) draw.code(ctx, code, (width - codeW) / 2, listY + 40, { lang: "c", highlight: hl(st.line), lineNumbers: true, width: codeW, lineHeight: 17 });
         }
 
-        setReadouts(readoutValues(c.readouts, { ...run.env, ...step.vars, step: k, steps: steps.length, n: run.n }));
+        setReadouts(readoutValues(c.readouts, { ...run.env, ...step.vars, step: k, steps: steps.length, n: run.n, result: run.result }));
       }}
     />
   );

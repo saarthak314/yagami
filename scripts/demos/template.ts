@@ -10,8 +10,9 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { call, type Effort, fixEffort, prewarm, roleModel, systemCacheControl, textOf } from "../lib/claude";
 import type { BookConfig, DemoSpec } from "../../src/types";
 import { emit } from "../lib/report";
-import { anchorContext, type Ctx, extractJson, loadPlan, log, paths, pngBlock, tag, textSourceNote } from "./common";
-import { bookImages, buildEffort, loadConvo, saveConvo, saveSpec, type Convo } from "./build";
+import { anchorContext, type Ctx, extractJson, loadPlan, log, paths, pngBlock, tag } from "./common";
+import { bookImages, buildEffort, demoRegions, loadConvo, regionsBlock, saveConvo, saveSpec, type Convo } from "./build";
+import { groundingRequest, isOcr, type Region, sourceNote, standInPhrase } from "./quality";
 import { DEMO_RULES } from "./rules";
 import { PlanAssembler, type OutlineDemo } from "./plan";
 
@@ -79,11 +80,11 @@ One \`\`\`json block containing a DemoSpec plus "template", "config" and "expect
 {
   "id", "title", "component", "brief": "1–2 sentences: what the demo shows",
   "presets": [{ "id", "label", "params": { <every control id>: value, plus any fixed params the config uses } }],
-  "controls": [ ≤ 4 ControlSpec ], "readouts": [ ≤ 4 { "id", "label" } ],
+  "controls": [ ≤ 4 ControlSpec ], "readouts": [ ≤ 4 { "id", "label", "range"?: [min, max] } ],
   "beats": [{ "anchor": "<anchor id from the outline>", "preset": "<preset id>", "caption": "1–2 plain sentences in your own words, specific to that paragraph", "params"?: { overrides } }],
   "template": "<template id>",
   "config": { …exactly as that template's doc describes; refer to params by their ids… },
-  "expect": [{ "anchor": "<beat anchor>", "readout": "<readout id>", "value": <number>, "tol"?: <relative tolerance, 0 = exact> }]
+  "expect": [{ "anchor": "<beat anchor>", "readout": "<readout id>", "value": <number>, "tol"?: <relative tolerance, 0 = exact>, "why"?: "<formula and inputs, for a computed value>" }]
 }
 
 Robustness (written for coded demos — for a config it means: every readout and expression stays finite at every control's min and max and in every preset, labels stay inside the stage and don't overlap, nothing depends on randomness without a seed):
@@ -92,7 +93,10 @@ ${DEMO_RULES}
 Rules
 - Keep the outline's ids, component name, beat anchors and readout ids.
 - Every param id an expression or field in the config uses must be a control or a preset param.
-- "expect": add an entry wherever the text pins down a readout's value at a beat (a quoted number, a worked example, an equation evaluated at the beat's params). Only values that follow unambiguously from the text and the beat's params; omit the list otherwise. Readouts are rendered with \`fmt\` (3 decimals) unless the config formats them.
+- "expect": add an entry wherever the text pins down a readout's value at a beat (a quoted number, a worked example, an equation evaluated at the beat's params). Only values that follow unambiguously from the text and the beat's params; omit the list otherwise. A computed value gets "why" (formula and inputs). Readouts are rendered with \`fmt\` (3 decimals) unless the config formats them.
+- Numbers: data in the config (table rows, constants), "expect" values and numbers in captions are copied exactly from the text or the whole referenced table/figure (or follow from them) — never invented or misremembered.
+- "range" on a readout: give [min, max] when its value has physical or mathematical bounds (errors, distances and counts ≥ 0, probabilities in [0, 1]); null for an open side, e.g. [0, null].
+- The template must show what the text describes. If it could only be a stand-in, the closest match or an approximation of it, reply with exactly {"template": "custom"} instead (the demo is then coded).
 - Captions: no exclamation marks, never mention AI, never copy sentences from the text.
 - Reply with only the \`\`\`json block.`;
     // 1-hour TTL: runs within an hour share this prefix (see systemCacheControl).
@@ -143,9 +147,13 @@ async function turn(book: BookConfig, effort: Effort, label: string, messages: A
 }
 
 /** Validate a reply against the spec rules and the template; returns the spec or the problems. */
-async function checkReply(raw: unknown, o: OutlineDemo, templateId: string, plan: PlanAssembler): Promise<{ spec?: DemoSpec; errors: string[] }> {
+async function checkReply(raw: unknown, o: OutlineDemo, templateId: string, plan: PlanAssembler): Promise<{ spec?: DemoSpec; errors: string[]; standIn?: string; ungrounded?: string[] }> {
   if (!raw || typeof raw !== "object") return { errors: ["the reply had no JSON spec"] };
-  const r = raw as { config?: unknown; template?: unknown };
+  const r = raw as { config?: unknown; template?: unknown; brief?: unknown };
+  // The builder declined the template, or its own words admit a stand-in: code it instead.
+  if (r.template === "custom") return { errors: ['the reply chose "custom"'], standIn: 'reply chose "custom"' };
+  const standIn = standInPhrase(typeof r.brief === "string" ? r.brief : "");
+  if (standIn) return { errors: [`the template would be a stand-in ("${standIn}")`], standIn };
   const checked = plan.check(raw, o);
   const errors = [...checked.errors];
   const tpl = (await templates()).find((t) => t.id === templateId);
@@ -163,11 +171,11 @@ async function checkReply(raw: unknown, o: OutlineDemo, templateId: string, plan
       errors.push(`the config could not be validated: ${(e as Error).message}`);
     }
   }
-  return errors.length ? { errors } : { spec, errors: [] };
+  return errors.length ? { errors } : { spec, errors: [], ungrounded: plan.ground(spec, o, checked.derived) };
 }
 
-function firstMessage(c: Ctx, o: OutlineDemo, others: OutlineDemo[], images: Anthropic.Beta.BetaContentBlockParam[]): Anthropic.Beta.BetaMessageParam {
-  const src = textSourceNote(c.book);
+function firstMessage(c: Ctx, o: OutlineDemo, others: OutlineDemo[], images: Anthropic.Beta.BetaContentBlockParam[], regions: Region[] = []): Anthropic.Beta.BetaMessageParam {
+  const src = sourceNote(c.book);
   const beats = o.beats.map((b, i) => `Beat ${i} at ${b.anchor} — ${b.focus}\n${anchorContext(c, b.anchor, 1, 1)}`).join("\n\n");
   const rest = others.filter((x) => x.id !== o.id).map((x) => `- ${x.title}: ${x.idea}`).join("\n");
   return {
@@ -175,7 +183,7 @@ function firstMessage(c: Ctx, o: OutlineDemo, others: OutlineDemo[], images: Ant
     content: [
       {
         type: "text",
-        text: `Write the spec and config for this outline item from "${c.book.title}", using the template "${o.template}":\n\n\`\`\`json\n${JSON.stringify(o, null, 2)}\n\`\`\`\n\nOther demos (don't duplicate them):\n${rest || "(none)"}\n\nThe beats and the paragraphs they are anchored to (">>>" marks the anchor; ${src.name}. ${src.caveat} The crops below are authoritative):\n\n${beats}`,
+        text: `Write the spec and config for this outline item from "${c.book.title}", using the template "${o.template}":\n\n\`\`\`json\n${JSON.stringify(o, null, 2)}\n\`\`\`\n\nOther demos (don't duplicate them):\n${rest || "(none)"}\n\nThe beats and the paragraphs they are anchored to (">>>" marks the anchor; ${src.name}. ${src.caveat} The crops below are authoritative):\n\n${beats}${regionsBlock(regions)}`,
       },
       ...images,
     ],
@@ -196,38 +204,65 @@ export async function generateTemplateDemo(c: Ctx, o: OutlineDemo, plan: PlanAss
   const t = tag(book.slug, c.unit.unit);
   const templateId = o.template!;
   emit({ type: "demo", unit: c.unit.unit, id: o.id, phase: "building", detail: `configuring the ${templateId} template` });
-  const images = await bookImages(c, { brief: `${o.idea} ${o.beats.map((b) => b.focus).join(" ")}`, beats: o.beats.map((b) => ({ anchor: b.anchor, preset: "", caption: "" })) });
-  const messages: Anthropic.Beta.BetaMessageParam[] = [firstMessage(c, o, others, images)];
+  const regions = demoRegions(c, [o.idea, ...o.beats.map((b) => b.focus)], o.beats.map((b) => b.anchor));
+  const images = await bookImages(c, { brief: `${o.idea} ${o.beats.map((b) => b.focus).join(" ")}`, beats: o.beats.map((b) => ({ anchor: b.anchor, preset: "", caption: "" })) }, regions);
+  const messages: Anthropic.Beta.BetaMessageParam[] = [firstMessage(c, o, others, images, regions)];
   const effort = templateEffort();
-  let result: { spec?: DemoSpec; errors: string[] } = { errors: [] };
   const correction = (errors: string[]) =>
     messages.push({ role: "user", content: `The spec/config needs corrections:\n${errors.map((e) => `- ${e}`).join("\n")}\n\nReply with the complete corrected JSON in one \`\`\`json block (same ids).` });
-  // A prefilled first reply (direct planning) counts as the first attempt.
+  // The last valid spec, and whether its ungrounded numbers were already sent back once (grounding
+  // never forces the code fallback: after one request a valid spec is kept as it is).
+  let valid: DemoSpec | undefined;
+  let groundAsked = false;
+  let lastErrors: string[] = [];
+  /** Judge one reply: "done", "standin", or "again" (a correction is queued when another turn follows). */
+  const judge = (res: Awaited<ReturnType<typeof checkReply>>, more: boolean): "done" | "standin" | "again" => {
+    if (res.standIn) return "standin";
+    if (!res.errors.length && res.spec) {
+      valid = res.spec;
+      if (!res.ungrounded?.length || groundAsked || !more) {
+        if (res.ungrounded?.length) log(`template ${t} ${o.id}: ${res.ungrounded.length} number(s) still ungrounded (kept): ${res.ungrounded[0]}`);
+        return "done";
+      }
+      groundAsked = true;
+      log(`template ${t} ${o.id}: ${res.ungrounded.length} ungrounded number(s): ${res.ungrounded[0]}`);
+      messages.push({ role: "user", content: `${groundingRequest(res.ungrounded, isOcr(book))}\n\nReply with the complete corrected JSON in one \`\`\`json block (same ids).` });
+      return "again";
+    }
+    log(`template ${t} ${o.id}: ${res.errors.length} problem(s): ${res.errors.slice(0, 2).join("; ")}`);
+    lastErrors = res.errors;
+    if (more) correction(res.errors);
+    return "again";
+  };
+  // A prefilled first reply (direct planning) counts as the first attempt; two repair turns follow at
+  // most (falling back to code is far slower and costlier than another short config turn).
   let attempt = 0;
+  let verdict: "done" | "standin" | "again" = "again";
   if (topts.prefill) {
     messages.push({ role: "assistant", content: topts.prefill });
-    result = await checkReply(jsonOf(topts.prefill), o, templateId, plan);
     attempt = 1;
-    if (result.errors.length) {
-      log(`template ${t} ${o.id}: ${result.errors.length} problem(s): ${result.errors.slice(0, 2).join("; ")}`);
-      correction(result.errors);
-    }
+    verdict = judge(await checkReply(jsonOf(topts.prefill), o, templateId, plan), true);
   } else await warmTemplates(book, effort);
-  // Two repair turns: falling back to code is far slower and costlier than another short config turn.
-  for (; attempt < 3 && (attempt === 0 || result.errors.length); attempt++) {
+  for (; attempt < 3 && verdict === "again"; attempt++) {
     const r = await turn(book, effort, `template:${t}:${o.id}`, messages);
-    if (!r) return { ok: false, fallback: true, why: "the template config reply was cut off" };
+    if (!r) {
+      if (valid) break;
+      return { ok: false, fallback: true, why: "the template config reply was cut off" };
+    }
     messages.push({ role: "assistant", content: r.message.content });
-    result = await checkReply(jsonOf(textOf(r.message)), o, templateId, plan);
-    if (!result.errors.length) break;
-    log(`template ${t} ${o.id}: ${result.errors.length} problem(s): ${result.errors.slice(0, 2).join("; ")}`);
-    if (attempt < 2) correction(result.errors);
+    verdict = judge(await checkReply(jsonOf(textOf(r.message)), o, templateId, plan), attempt < 2);
   }
-  if (result.errors.length || !result.spec) {
+  if (verdict === "standin") {
+    log(`template ${t} ${o.id}: the ${templateId} template would only be a stand-in; generating it as code instead`);
+    return { ok: false, fallback: true, why: `the ${templateId} template would only be a stand-in` };
+  }
+  if (!valid) {
     log(`template ${t} ${o.id}: no valid config; generating it as code instead`);
-    return { ok: false, fallback: true, why: result.errors[0] };
+    return { ok: false, fallback: true, why: lastErrors[0] ?? "no valid config" };
   }
-  const spec = result.spec;
+  const spec = valid;
+  // A correction whose answer never came (cut off): the conversation ends at the last reply.
+  while (messages.length > 1 && messages.at(-1)!.role === "user") messages.pop();
   plan.accept(spec);
   // Remove a stale component file from an earlier code build of this demo (the template renders it now).
   const file = paths.component(book.slug, c.unit.unit, spec.component);
@@ -314,7 +349,10 @@ export function templateArtifact(spec: DemoSpec): string | null {
   return spec.template ? JSON.stringify({ template: spec.template, config: spec.config ?? null }) : null;
 }
 
-/** Whether a template demo can skip the model review: every reader-checkable value is pinned by `expect`. */
-export function skipsReview(spec: DemoSpec): boolean {
-  return !!spec.template && !!spec.expect?.length;
+/**
+ * Whether a template demo can skip the model review: never. `expect` pins only the values the text
+ * gives; wrong data or a caption the picture contradicts passed unreviewed (one contact-sheet review is cheap).
+ */
+export function skipsReview(_spec: DemoSpec): boolean {
+  return false;
 }

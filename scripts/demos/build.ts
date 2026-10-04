@@ -11,11 +11,12 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { AbortedError, call, type Effort, fixEffort, pool, prewarm, roleModel, systemCacheControl, textOf } from "../lib/claude";
 import type { Anchor, BookConfig, Domain, DemoSpec, Expectation } from "../../src/types";
 import { loadBook } from "../books";
-import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, specSink, tag, textSourceNote, writeJson } from "./common";
+import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, specSink, tag, writeJson } from "./common";
 import { emit } from "../lib/report";
 import { domainOf } from "./domains";
 import { DEMO_RULES } from "./rules";
 import type { OutlineDemo, PlanAssembler } from "./plan";
+import { groundingRequest, isOcr, referencedRegions, type Region, regionCrop, regionsText, sourceNote } from "./quality";
 
 const run = promisify(execFile);
 
@@ -173,12 +174,13 @@ Only when most of the file changes, reply with the complete file in a \`\`\`tsx 
 
 ## When you are given an outline item instead of a spec
 Then you write the full DemoSpec yourself and implement it in the same reply:
-- id, component, title: exactly as in the outline. readouts: the outline's readout ids (labels may use $LaTeX$).
+- id, component, title: exactly as in the outline. readouts: the outline's readout ids (labels may use $LaTeX$). Give a readout "range": [min, max] when its value has physical or mathematical bounds (errors, distances and counts ≥ 0, probabilities in [0, 1]); null for an open side, e.g. [0, null].
 - brief: one or two sentences in your own words saying what the demo shows (kept as context for later fixes; the code is the real spec).
 - controls: at most 6 (sliders with sensible min/max/step/unit, toggles, selects); no play/pause/restart or preset picker (the shell has them).
 - presets: at least one; each gives a value for every control id (extra fixed params are fine).
 - beats: exactly the outline's anchors, in the same order; each sets a preset plus optional param overrides matching the numbers in that paragraph ("text values"); caption: one or two plain sentences (≤ 260 chars) in your own words telling the reader what to look at; $LaTeX$ for symbols with sub/superscripts; no hype, no exclamation marks, no mention of AI. Never copy sentences from the text.
-- expect: readout values the text pins down unambiguously at a beat (a quoted number, or a formula from the text evaluated at that beat's numbers), as { "anchor", "readout", "value", "tol"? }. Omit anything the text doesn't determine. An empty list is fine.
+- expect: readout values the text pins down unambiguously at a beat (a quoted number, or a formula from the text evaluated at that beat's numbers), as { "anchor", "readout", "value", "tol"?, "why"? }. A quoted number is copied exactly as printed (from the paragraph or the referenced table/figure — read the whole table); a computed one gets "why": "<formula and inputs>". Omit anything the text doesn't determine. An empty list is fine.
+- Numbers you present as the text's (data arrays, captions, expect) must be printed in the text or the referenced table/figure, or follow from them; never invent or misremember them.
 Reply with exactly two fenced blocks and nothing else: first \`\`\`json with the DemoSpec (including "expect"), then \`\`\`tsx with the complete file.`;
 
   // 1-hour TTL: runs within an hour share this ~30k-token prefix (see systemCacheControl).
@@ -190,11 +192,17 @@ Reply with exactly two fenced blocks and nothing else: first \`\`\`json with the
 // --- Inputs ----------------------------------------------------------------
 
 /**
- * Page crops for the demo: every beat's anchor region plus any figure/table
- * anchor whose text names a figure the brief mentions ("Fig. 13-3",
- * "Figure 2", "Table 1"). Dark on light.
+ * Page crops for the demo: the whole referenced figures/tables (`regions`, high resolution), every
+ * beat's anchor region, plus any figure/table anchor whose text names a figure the brief mentions
+ * ("Fig. 13-3", "Figure 2", "Table 1"). Dark on light.
  */
-export async function bookImages(c: Ctx, spec: Pick<DemoSpec, "brief" | "beats">): Promise<Anthropic.Beta.BetaContentBlockParam[]> {
+export async function bookImages(c: Ctx, spec: Pick<DemoSpec, "brief" | "beats">, regions: Region[] = []): Promise<Anthropic.Beta.BetaContentBlockParam[]> {
+  const out: Anthropic.Beta.BetaContentBlockParam[] = [];
+  // Whole referenced figures/tables first, at high resolution (their text lines go into the message).
+  for (const r of regions) {
+    const buf = (await regionCrop(c, r.anchor)) ?? (await anchorCrop(c, r.anchor));
+    if (buf) out.push({ type: "text", text: `${r.label}, the whole region (page ${r.anchor.page}):` }, pngBlock(buf));
+  }
   // Figure numbers the brief names: "Fig. 13-3", "Figure 2", "Table 1".
   const figs = new Set([...spec.brief.matchAll(/\b(Fig(?:ure|s?\.)?|Table)\s*(\d+(?:[-–.]\d+)?)/g)].map((m) => `${m[1].startsWith("T") ? "Table" : "Fig"} ${m[2].replace("–", "-")}`));
   const wanted: { anchor: Anchor; why: string }[] = [];
@@ -212,8 +220,8 @@ export async function bookImages(c: Ctx, spec: Pick<DemoSpec, "brief" | "beats">
     const a = c.unit.anchors.find((x) => x.id === b.anchor);
     if (a && !wanted.some((w) => w.anchor.id === a.id)) wanted.push({ anchor: a, why: `Anchored region for ${a.id}` });
   }
-  const out: Anthropic.Beta.BetaContentBlockParam[] = [];
-  for (const w of wanted.slice(0, 8)) {
+  const shown = new Set(regions.map((r) => r.anchor.id));
+  for (const w of wanted.filter((x) => !shown.has(x.anchor.id)).slice(0, Math.max(2, 8 - regions.length))) {
     const buf = await anchorCrop(c, w.anchor);
     if (!buf) continue;
     out.push({ type: "text", text: `${w.why} (page ${w.anchor.page}):` }, pngBlock(buf));
@@ -221,15 +229,30 @@ export async function bookImages(c: Ctx, spec: Pick<DemoSpec, "brief" | "beats">
   return out;
 }
 
-function firstMessage(c: Ctx, spec: DemoSpec, images: Anthropic.Beta.BetaContentBlockParam[]) {
+/** Figures/tables a demo refers to (named in its idea, beats, captions, brief or beat paragraphs), whole. */
+export function demoRegions(c: Ctx, texts: string[], anchors: string[]): Region[] {
+  try {
+    return referencedRegions(c, texts, anchors);
+  } catch (e) {
+    log(`build ${tag(c.book.slug, c.unit.unit)}: referenced regions unavailable (${(e as Error).message})`);
+    return [];
+  }
+}
+
+/** Prompt text for whole referenced regions ("" when none). */
+export function regionsBlock(regions: Region[]): string {
+  return regions.length ? `\n\nReferenced tables/figures — read values from these whole regions, not from memory:\n\n${regionsText(regions)}` : "";
+}
+
+function firstMessage(c: Ctx, spec: DemoSpec, images: Anthropic.Beta.BetaContentBlockParam[], regions: Region[] = []) {
   const beats = spec.beats
     .map((b, i) => `Beat ${i} (preset "${b.preset}"${b.params ? `, params ${JSON.stringify(b.params)}` : ""}) — caption: ${b.caption}\n${anchorContext(c, b.anchor)}`)
     .join("\n\n");
-  const src = textSourceNote(c.book);
+  const src = sourceNote(c.book);
   const content: Anthropic.Beta.BetaContentBlockParam[] = [
     {
       type: "text",
-      text: `Write src/demos/${c.book.slug}/${c.unit.unit}/${spec.component}.tsx for this demo spec (from "${c.book.title}"):\n\n\`\`\`json\n${JSON.stringify(spec, null, 2)}\n\`\`\`\n\nThe beats and the paragraphs they are anchored to (">>>" marks the anchor; ${src.name}. ${src.caveat} The page crops below are authoritative):\n\n${beats}`,
+      text: `Write src/demos/${c.book.slug}/${c.unit.unit}/${spec.component}.tsx for this demo spec (from "${c.book.title}"):\n\n\`\`\`json\n${JSON.stringify(spec, null, 2)}\n\`\`\`\n\nThe beats and the paragraphs they are anchored to (">>>" marks the anchor; ${src.name}. ${src.caveat} The page crops below are authoritative):\n\n${beats}${regionsBlock(regions)}`,
     },
     ...images,
   ];
@@ -459,7 +482,8 @@ export interface BuildOpts extends ConvoOpts {
 export async function buildDemo(c: Ctx, spec: DemoSpec, opts: BuildOpts = {}): Promise<boolean> {
   const effort = opts.effort ?? buildEffort();
   await warmBuilder(c.book, effort);
-  const convo: Convo = { book: c.book.slug, unit: c.unit.unit, spec, effort, messages: [firstMessage(c, spec, await bookImages(c, spec))] };
+  const regions = demoRegions(c, [spec.brief, ...spec.beats.map((b) => b.caption)], spec.beats.map((b) => b.anchor));
+  const convo: Convo = { book: c.book.slug, unit: c.unit.unit, spec, effort, messages: [firstMessage(c, spec, await bookImages(c, spec, regions), regions)] };
   return runConvo(convo, 4, "building", undefined, opts);
 }
 
@@ -480,8 +504,8 @@ function splitReply(text: string): { spec?: unknown; code?: string } {
   return out;
 }
 
-function outlineMessage(c: Ctx, o: OutlineDemo, others: OutlineDemo[], images: Anthropic.Beta.BetaContentBlockParam[]): Anthropic.Beta.BetaMessageParam {
-  const src = textSourceNote(c.book);
+function outlineMessage(c: Ctx, o: OutlineDemo, others: OutlineDemo[], images: Anthropic.Beta.BetaContentBlockParam[], regions: Region[] = []): Anthropic.Beta.BetaMessageParam {
+  const src = sourceNote(c.book);
   const beats = o.beats.map((b, i) => `Beat ${i} at ${b.anchor} — ${b.focus}\n${anchorContext(c, b.anchor, 1, 1)}`).join("\n\n");
   const rest = others.filter((x) => x.id !== o.id).map((x) => `- ${x.title}: ${x.idea}`).join("\n");
   return {
@@ -489,7 +513,7 @@ function outlineMessage(c: Ctx, o: OutlineDemo, others: OutlineDemo[], images: A
     content: [
       {
         type: "text",
-        text: `Write the spec and src/demos/${c.book.slug}/${c.unit.unit}/${o.component}.tsx for this outline item from "${c.book.title}":\n\n\`\`\`json\n${JSON.stringify(o, null, 2)}\n\`\`\`\n\nOther demos for this ${c.book.units.length === 1 && c.book.source.kind === "text" ? "paper" : "chapter"} (don't duplicate them):\n${rest || "(none)"}\n\nThe beats and the paragraphs they are anchored to (">>>" marks the anchor; ${src.name}. ${src.caveat} The page crops below are authoritative):\n\n${beats}`,
+        text: `Write the spec and src/demos/${c.book.slug}/${c.unit.unit}/${o.component}.tsx for this outline item from "${c.book.title}":\n\n\`\`\`json\n${JSON.stringify(o, null, 2)}\n\`\`\`\n\nOther demos for this ${c.book.units.length === 1 && c.book.source.kind === "text" ? "paper" : "chapter"} (don't duplicate them):\n${rest || "(none)"}\n\nThe beats and the paragraphs they are anchored to (">>>" marks the anchor; ${src.name}. ${src.caveat} The page crops below are authoritative):\n\n${beats}${regionsBlock(regions)}`,
       },
       ...images,
       ...(images.length ? [{ type: "text" as const, text: "Where the demo re-draws a figure from the text, match its geometry and labelling, but in the reader's theme." }] : []),
@@ -527,8 +551,9 @@ export async function generateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, 
   const t = tag(book.slug, c.unit.unit);
   const ev = (phase: "building" | "typecheck" | "fixing", detail?: string) => gopts.quiet || emit({ type: "demo", unit: c.unit.unit, id: o.id, phase, detail });
   ev("building");
-  const images = await bookImages(c, { brief: `${o.idea} ${o.beats.map((b) => b.focus).join(" ")}`, beats: o.beats.map((b) => ({ anchor: b.anchor, preset: "", caption: "" })) });
-  const messages: Anthropic.Beta.BetaMessageParam[] = [outlineMessage(c, o, others, images)];
+  const regions = demoRegions(c, [o.idea, ...o.beats.map((b) => b.focus)], o.beats.map((b) => b.anchor));
+  const images = await bookImages(c, { brief: `${o.idea} ${o.beats.map((b) => b.focus).join(" ")}`, beats: o.beats.map((b) => ({ anchor: b.anchor, preset: "", caption: "" })) }, regions);
+  const messages: Anthropic.Beta.BetaMessageParam[] = [outlineMessage(c, o, others, images, regions)];
   const effort = gopts.effort ?? buildEffort();
   let simplified = false;
   let turnEffort = effort;
@@ -563,18 +588,32 @@ export async function generateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, 
   }
   const code = reply.code;
   let checked = plan.check(reply.spec, o);
-  if (checked.errors.length) {
-    log(`build ${t} ${o.id}: spec needs ${checked.errors.length} correction(s)`);
+  // Ungrounded numbers get one correction request (with any spec errors); they never reject a spec.
+  const ungrounded = checked.spec ? plan.ground(checked.spec, o, checked.derived) : [];
+  if (checked.errors.length || ungrounded.length) {
+    log(`build ${t} ${o.id}: spec needs ${checked.errors.length + ungrounded.length} correction(s)${ungrounded.length ? ` (${ungrounded.length} ungrounded number(s))` : ""}`);
+    const asks = [
+      ...(checked.errors.length ? [`The spec needs corrections before it can be used:\n${checked.errors.map((e) => `- ${e}`).join("\n")}`] : []),
+      ...(ungrounded.length ? [groundingRequest(ungrounded, isOcr(book))] : []),
+    ];
     messages.push({
       role: "user",
-      content: `The spec needs corrections before it can be used:\n${checked.errors.map((e) => `- ${e}`).join("\n")}\n\nReply with only the corrected spec as one \`\`\`json block (same shape, with "expect"). Keep ids, control ids and readout ids unless a correction requires changing them.`,
+      content: `${asks.join("\n\n")}\n\nReply with only the corrected spec as one \`\`\`json block (same shape, with "expect"). Keep ids, control ids and readout ids unless a correction requires changing them.${ungrounded.length ? " If a corrected number is also in the code, say so in one line after the block; the file is fixed separately." : ""}`,
     });
+    const original = checked;
     const fixed = await ask("build");
     checked = fixed.spec === undefined ? { errors: ["the corrected spec was missing"] } : plan.check(fixed.spec, o);
+    // A grounding-only correction that broke the spec: keep the original (valid) spec.
+    if ((checked.errors.length || !checked.spec) && !original.errors.length && original.spec) {
+      log(`build ${t} ${o.id}: grounding correction unusable (${checked.errors[0] ?? "invalid"}); keeping the first spec`);
+      checked = original;
+    }
     if (checked.errors.length || !checked.spec) {
       log(`build ${t} ${o.id}: spec rejected: ${checked.errors.join("; ")}`);
       return { ok: false, why: `spec rejected: ${checked.errors[0] ?? "invalid"}` };
     }
+    const still = ungrounded.length ? plan.ground(checked.spec, o, checked.derived) : [];
+    if (still.length) log(`build ${t} ${o.id}: ${still.length} number(s) still ungrounded after one correction (kept): ${still[0]}`);
   }
   const spec = checked.spec!;
   if (gopts.accept !== false) plan.accept(spec);

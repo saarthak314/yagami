@@ -7,7 +7,7 @@ import { draw, theme } from "../kit";
 import { Stage } from "./stage";
 import { compile, compileField, type Env } from "./expr";
 import type { DataStructureConfig, Structure, StructureOp } from "./configs";
-import { applyDefs, compileDefs, compileReadouts, opt, paramEnv, readoutValues, stepIndex, textWidth, val, type TemplateProps } from "./runtime";
+import { END_HOLD, applyDefs, compileDefs, compileReadouts, opt, paramEnv, readoutValues, stepIndex, textWidth, val, type TemplateProps } from "./runtime";
 import { LABEL_FONT } from "./ui";
 
 interface Node {
@@ -20,6 +20,7 @@ interface Snap {
   nodes: Node[]; // bst
   root: number | null;
   buckets: number[][];
+  slots: (number | "del" | null)[]; // open addressing
 }
 interface DStep {
   snap: Snap;
@@ -50,6 +51,9 @@ const CODE: Record<string, string[]> = {
   "hash-table.insert": ["b = hash(x)", "for (y in table[b])", "  if (y == x) return", "table[b].append(x)"],
   "hash-table.search": ["b = hash(x)", "for (y in table[b])", "  if (y == x) return true", "return false"],
   "hash-table.delete": ["b = hash(x)", "for (y in table[b])", "  if (y == x) remove y", "return"],
+  "open-addressing.insert": ["i = hash(x)", "while (t[i] != null)", "  if (t[i] == x) return   // already stored", "  i = (i + 1) % m       // wraps around", "t[first del or null seen] = x"],
+  "open-addressing.search": ["i = hash(x)", "while (t[i] != null)", "  if (t[i] == x) return i", "  i = (i + 1) % m       // probe past del", "return null"],
+  "open-addressing.delete": ["i = hash(x)", "while (t[i] != null)", "  if (t[i] == x) { t[i] = del; return }", "  i = (i + 1) % m", "return null"],
 };
 
 function bstHeight(nodes: Node[], id: number | null): number {
@@ -57,12 +61,19 @@ function bstHeight(nodes: Node[], id: number | null): number {
 }
 
 function simulate(kind: Structure, ops: { op: StructureOp; value: number }[], bucketCount: number, hashOf: (key: number) => number): DStep[] {
-  const snap: Snap = { list: [], nodes: [], root: null, buckets: Array.from({ length: bucketCount }, () => []) };
+  const snap: Snap = { list: [], nodes: [], root: null, buckets: Array.from({ length: bucketCount }, () => []), slots: Array.from({ length: bucketCount }, () => null) };
   const steps: DStep[] = [];
-  const vars = { size: 0, comparisons: 0, height: 0, collisions: 0, maxChain: 0, found: -1, top: NaN, done: 0 };
-  const clone = (): Snap => ({ list: [...snap.list], nodes: snap.nodes.map((n) => ({ ...n })), root: snap.root, buckets: snap.buckets.map((b) => [...b]) });
+  const vars = { size: 0, comparisons: 0, height: 0, collisions: 0, maxChain: 0, found: -1, top: NaN, done: 0, probes: 0, runLength: 0, dels: 0, load: 0 };
+  const clone = (): Snap => ({ list: [...snap.list], nodes: snap.nodes.map((n) => ({ ...n })), root: snap.root, buckets: snap.buckets.map((b) => [...b]), slots: [...snap.slots] });
   const update = () => {
-    vars.size = kind === "bst" ? countBst(snap) : kind === "hash-table" ? snap.buckets.reduce((s, b) => s + b.length, 0) : snap.list.length;
+    vars.size =
+      kind === "bst" ? countBst(snap) : kind === "hash-table" ? snap.buckets.reduce((s, b) => s + b.length, 0) : kind === "open-addressing" ? snap.slots.filter((v) => typeof v === "number").length : snap.list.length;
+    if (kind === "open-addressing") {
+      const t = snap.slots;
+      vars.dels = t.filter((v) => v === "del").length;
+      vars.load = (vars.size + vars.dels) / Math.max(1, t.length);
+      vars.runLength = longestRun(t);
+    }
     vars.height = kind === "bst" ? bstHeight(snap.nodes, snap.root) : kind === "min-heap" ? (snap.list.length ? Math.floor(Math.log2(snap.list.length)) + 1 : 0) : 0;
     vars.maxChain = Math.max(0, ...snap.buckets.map((b) => b.length));
     vars.top = kind === "stack" ? (snap.list.at(-1) ?? NaN) : kind === "queue" || kind === "min-heap" || kind === "linked-list" ? (snap.list[0] ?? NaN) : kind === "bst" && snap.root !== null ? snap.nodes[snap.root].v : NaN;
@@ -235,6 +246,50 @@ function simulate(kind: Structure, ops: { op: StructureOp; value: number }[], bu
           }
         } else push(key, 3, "the heap is empty again");
       }
+    } else if (kind === "open-addressing") {
+      // Linear probing: t[i] is a key, del (a deleted key: probing continues past it) or null (stops a probe).
+      const t = snap.slots;
+      const M = t.length;
+      const h = ((hashOf(x) % M) + M) % M;
+      vars.probes = 0;
+      push(key, 0, `hash(${x}) = ${h}`, [h], [h]);
+      let i = h;
+      let free = -1;
+      let pos = -1;
+      for (let n = 0; n < M && t[i] !== null; n++) {
+        vars.probes++;
+        const wrap = i === M - 1 ? " → wrap around to t[0]" : "";
+        if (t[i] === "del") {
+          if (free < 0) free = i;
+          push(key, 3, `t[${i}] = del: keep probing${wrap}`, [i], [h]);
+        } else {
+          vars.comparisons++;
+          if (t[i] === x) {
+            pos = i;
+            if (op === "search") vars.found = 1;
+            push(key, 2, `t[${i}] = ${x}: found after ${vars.probes} probe${vars.probes === 1 ? "" : "s"}`, [i], [h]);
+            break;
+          }
+          push(key, 3, `t[${i}] = ${t[i]} ≠ ${x}${wrap}`, [i], [h]);
+        }
+        i = (i + 1) % M;
+      }
+      if (op === "insert") {
+        if (pos >= 0) push(key, 2, `${x} is already stored`, [pos], [h]);
+        else if (free < 0 && t[i] !== null) push(key, 4, "the table is full", [], [h]);
+        else {
+          const at = free >= 0 ? free : i;
+          if (at !== h) vars.collisions++;
+          t[at] = x;
+          push(key, 4, free >= 0 ? `store ${x} in the del slot t[${at}]` : `t[${at}] is null: store ${x}${at !== h ? ` (${(at - h + M) % M} past its home ${h})` : ""}`, [at], [h]);
+        }
+      } else if (op === "search") {
+        vars.found = pos >= 0 ? 1 : 0;
+        if (pos < 0) push(key, 4, `t[${i}] is null: ${x} is not stored (${vars.probes} probe${vars.probes === 1 ? "" : "s"})`, [i], [h]);
+      } else if (pos >= 0) {
+        t[pos] = "del";
+        push(key, 2, `t[${pos}] = del (not null, so later probes continue past it)`, [pos], [h]);
+      } else push(key, 4, `${x} is not stored`, [i], [h]);
     } else {
       const b = ((hashOf(x) % bucketCount) + bucketCount) % bucketCount;
       const chain = snap.buckets[b];
@@ -271,6 +326,19 @@ function simulate(kind: Structure, ops: { op: StructureOp; value: number }[], bu
   return steps;
 }
 
+/** Longest run of non-null slots, counting runs that wrap around the end. */
+function longestRun(t: (number | "del" | null)[]): number {
+  const M = t.length;
+  if (t.every((v) => v !== null)) return M;
+  let best = 0;
+  let cur = 0;
+  for (let k = 0; k < 2 * M; k++) {
+    cur = t[k % M] !== null ? cur + 1 : 0;
+    best = Math.max(best, Math.min(cur, M));
+  }
+  return best;
+}
+
 function countBst(s: Snap): number {
   let n = 0;
   const walk = (id: number | null) => {
@@ -298,7 +366,8 @@ export default function DataStructure({ config, params, playing, resetKey, width
   const paramsKey = JSON.stringify(params);
   const run = useMemo(() => {
     const env: Env = applyDefs(paramEnv(params), c.defs);
-    const m = Math.max(1, Math.min(16, Math.round(c.buckets !== undefined ? val(c.buckets, env) || 7 : 7)));
+    const oa = config.kind === "open-addressing";
+    const m = Math.max(1, Math.min(oa ? 24 : 16, Math.round(c.buckets !== undefined ? val(c.buckets, env) || 7 : oa ? 10 : 7)));
     const hashOf = (key: number) => {
       const h = c.hash ? Math.round(val(c.hash, { ...env, key, m })) : key;
       return Number.isFinite(h) ? h : 0;
@@ -320,7 +389,7 @@ export default function DataStructure({ config, params, playing, resetKey, width
         clk.t += dt;
         const speed = Math.max(0.2, c.speed !== undefined ? val(c.speed, run.env) || 1 : 1);
         const steps = run.steps;
-        const k = stepIndex(clk.t, steps.length, speed);
+        const k = stepIndex(clk.t, steps.length, speed, END_HOLD);
         const st = steps[k];
         const s = st.snap;
 
@@ -435,6 +504,28 @@ export default function DataStructure({ config, params, playing, resetKey, width
           });
           if (a.length) draw.cells(ctx, a.map(fmt), { left: area.left, top: area.top + area.height - 56, width: area.width, height: 50 }, { style: (i) => (st.hot.includes(i) ? "active" : "normal"), maxCell: 32 });
           else draw.text(ctx, "empty heap", width / 2, area.top + 30, { align: "center", color: theme.faint });
+        } else if (config.kind === "open-addressing") {
+          const t = s.slots;
+          const row = draw.cells(
+            ctx,
+            t.map((v) => (v === null ? "" : v === "del" ? "del" : fmt(v))),
+            { left: area.left, top: area.top + Math.max(24, area.height / 2 - 50), width: area.width, height: 62 },
+            { style: (i) => (st.hot[0] === i ? "active" : t[i] === "del" ? "muted" : "normal"), maxCell: 40 },
+          );
+          if (st.hot.length) draw.pointer(ctx, row.x(st.hot[0]), row.top - 2, "i", { dir: "down", color: theme.accent });
+          // Runs of occupied slots (a run that wraps is drawn in two pieces).
+          const M = t.length;
+          const yRun = row.top + row.height + 22;
+          for (let a = 0; a < M; a++) {
+            const full = t.every((v) => v !== null);
+            if (t[a] === null || (full ? a > 0 : t[(a - 1 + M) % M] !== null)) continue;
+            let len = 0;
+            while (len < M && t[(a + len) % M] !== null) len++;
+            const pieces: [number, number][] = a + len <= M ? [[a, a + len - 1]] : [[a, M - 1], [0, (a + len - 1) % M]];
+            for (const [p, q] of pieces) draw.line(ctx, row.x(p) - row.cellSize / 2 + 3, yRun, row.x(q) + row.cellSize / 2 - 3, yRun, { color: theme.accent2, width: 2 });
+            if (len >= 2) draw.text(ctx, `run ${len}`, row.x(pieces[0][0]) - row.cellSize / 2 + 3, yRun + 10, { kind: "mono", size: 10, color: theme.accent2 });
+          }
+          if (st.path.length) draw.pointer(ctx, row.x(st.path[0]), yRun + 18, "home", { color: theme.muted, length: 14 });
         } else {
           const rows = run.m;
           const rowH = Math.min(30, area.height / rows);

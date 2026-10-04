@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 
 const SHORTCUTS: [string, string][] = [
-  ["next / previous step", "j  k"],
+  ["next / previous step in the text", "j  k"],
   ["play / pause", "space"],
   ["restart", "r"],
   ["pin demo", "h"],

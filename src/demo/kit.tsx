@@ -74,6 +74,25 @@ export interface StageTextBox {
   rotated?: boolean;
 }
 
+/**
+ * A filled or stroked shape drawn on the stage (CSS px, stage coordinates, axis-aligned bounds).
+ * Recorded only in isolated mode (automated checks: shapes cut off by the stage edge).
+ */
+export interface StageShapeBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  kind: "fill" | "stroke";
+  /** The path has a closed outline (rect, rounded rect, closePath, full circle) rather than only open lines. */
+  closed?: boolean;
+}
+
+/** A stage in isolated mode that the checks can run forward in time (deterministic frames). */
+export interface AdvanceStage {
+  advance(seconds: number): void;
+}
+
 /** A stage driven by the stress audit (isolated mode `&stress=1`): frames are stepped by hand. */
 export interface StressStage {
   /** Run one frame with this dt (seconds; 0 while paused, as in the real loop). Throws what the demo throws. */
@@ -92,12 +111,30 @@ declare global {
     __yagamiInstrument?: boolean;
     /** Text boxes of the last completed frame. */
     __stageText?: StageTextBox[];
+    /** Shape bounds of the last completed frame. */
+    __stageShapes?: StageShapeBox[];
     __stageSize?: { w: number; h: number };
+    /** Isolated mode: stages that can be run forward by hand. */
+    __advanceStages?: Set<AdvanceStage>;
+    /** Isolated mode: run every stage forward by `seconds` of demo time (30 fps steps), synchronously. */
+    __stageAdvance?: (seconds: number) => void;
   }
 }
 
+/**
+ * Where an instrumented context records to. The stage effect re-runs on resize with the same 2D
+ * context: it only swaps the sinks, so methods are never wrapped twice.
+ */
+const instrumented = new WeakMap<CanvasRenderingContext2D, { text?: () => StageTextBox[]; shapes?: () => StageShapeBox[] }>();
+
 /** Wrap fillText/strokeText so every string drawn on this context is measured into `sink()`. */
-function instrumentText(ctx: CanvasRenderingContext2D, dpr: number, sink: () => StageTextBox[]) {
+function instrumentText(ctx: CanvasRenderingContext2D, dpr: number, sinkIn: () => StageTextBox[]) {
+  const reg = instrumented.get(ctx) ?? {};
+  const wrapped = !!reg.text;
+  reg.text = sinkIn;
+  instrumented.set(ctx, reg);
+  if (wrapped) return;
+  const sink = () => (instrumented.get(ctx)?.text ?? sinkIn)();
   const record = (text: string, x: number, y: number, maxWidth?: number) => {
     const s = String(text);
     if (!s.trim() || ctx.globalAlpha < 0.05) return;
@@ -133,6 +170,205 @@ function instrumentText(ctx: CanvasRenderingContext2D, dpr: number, sink: () => 
     if (maxWidth === undefined) strokeT(text, x, y);
     else strokeT(text, x, y, maxWidth);
     record(text, x, y, maxWidth);
+  };
+}
+
+/**
+ * Wrap the path and rect methods so every filled or stroked shape's bounds are recorded into
+ * `sink()` (in stage CSS px). Shapes inside a clip region are skipped (they can't overflow);
+ * Path2D arguments are not tracked.
+ */
+function instrumentShapes(ctx: CanvasRenderingContext2D, dpr: number, sinkIn: () => StageShapeBox[]) {
+  const reg = instrumented.get(ctx) ?? {};
+  const wrapped = !!reg.shapes;
+  reg.shapes = sinkIn;
+  instrumented.set(ctx, reg);
+  if (wrapped) return;
+  const sink = () => (instrumented.get(ctx)?.shapes ?? sinkIn)();
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  let cx = 0;
+  let cy = 0;
+  let clipped = false;
+  let closed = false;
+  const clipStack: boolean[] = [];
+  const add = (x: number, y: number) => {
+    const tf = ctx.getTransform();
+    const px = (tf.a * x + tf.c * y + tf.e) / dpr;
+    const py = (tf.b * x + tf.d * y + tf.f) / dpr;
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+    x0 = Math.min(x0, px);
+    y0 = Math.min(y0, py);
+    x1 = Math.max(x1, px);
+    y1 = Math.max(y1, py);
+  };
+  const reset = () => {
+    x0 = y0 = Infinity;
+    x1 = y1 = -Infinity;
+    closed = false;
+  };
+  const arcPoints = (x: number, y: number, rx: number, ry: number, rot: number, a0: number, a1: number, ccw: boolean) => {
+    let span = ccw ? a0 - a1 : a1 - a0;
+    if (span < 0) span = (span % (2 * Math.PI)) + 2 * Math.PI;
+    if (span > 2 * Math.PI) span = 2 * Math.PI;
+    if (span > 2 * Math.PI - 1e-3) closed = true;
+    const n = Math.max(4, Math.ceil(span / (Math.PI / 12)));
+    const cr = Math.cos(rot);
+    const sr = Math.sin(rot);
+    for (let i = 0; i <= n; i++) {
+      const a = a0 + (ccw ? -1 : 1) * (span * i) / n;
+      const ex = rx * Math.cos(a);
+      const ey = ry * Math.sin(a);
+      add(x + ex * cr - ey * sr, y + ex * sr + ey * cr);
+    }
+    const ea = a0 + (ccw ? -1 : 1) * span;
+    cx = x + rx * Math.cos(ea) * cr - ry * Math.sin(ea) * sr;
+    cy = y + rx * Math.cos(ea) * sr + ry * Math.sin(ea) * cr;
+  };
+  const record = (kind: StageShapeBox["kind"], inflate = 0) => {
+    if (clipped || ctx.globalAlpha < 0.05 || !Number.isFinite(x0) || !Number.isFinite(x1)) return;
+    sink().push({ x: x0 - inflate, y: y0 - inflate, w: x1 - x0 + 2 * inflate, h: y1 - y0 + 2 * inflate, kind, closed });
+  };
+  const strokeHalf = () => {
+    const tf = ctx.getTransform();
+    return (ctx.lineWidth * Math.sqrt(Math.abs(tf.a * tf.d - tf.b * tf.c))) / dpr / 2;
+  };
+  const o = {
+    beginPath: ctx.beginPath.bind(ctx),
+    moveTo: ctx.moveTo.bind(ctx),
+    lineTo: ctx.lineTo.bind(ctx),
+    quadraticCurveTo: ctx.quadraticCurveTo.bind(ctx),
+    bezierCurveTo: ctx.bezierCurveTo.bind(ctx),
+    arc: ctx.arc.bind(ctx),
+    ellipse: ctx.ellipse.bind(ctx),
+    arcTo: ctx.arcTo.bind(ctx),
+    rect: ctx.rect.bind(ctx),
+    roundRect: ctx.roundRect?.bind(ctx) as ((...a: unknown[]) => void) | undefined,
+    closePath: ctx.closePath.bind(ctx),
+    fill: ctx.fill.bind(ctx) as (...a: unknown[]) => void,
+    stroke: ctx.stroke.bind(ctx) as (...a: unknown[]) => void,
+    fillRect: ctx.fillRect.bind(ctx),
+    strokeRect: ctx.strokeRect.bind(ctx),
+    clip: ctx.clip.bind(ctx) as (...a: unknown[]) => void,
+    save: ctx.save.bind(ctx),
+    restore: ctx.restore.bind(ctx),
+  };
+  ctx.beginPath = () => {
+    reset();
+    o.beginPath();
+  };
+  ctx.moveTo = (x: number, y: number) => {
+    add(x, y);
+    cx = x;
+    cy = y;
+    o.moveTo(x, y);
+  };
+  ctx.lineTo = (x: number, y: number) => {
+    add(x, y);
+    cx = x;
+    cy = y;
+    o.lineTo(x, y);
+  };
+  ctx.quadraticCurveTo = (qx: number, qy: number, x: number, y: number) => {
+    for (const t of [0.25, 0.5, 0.75]) add((1 - t) ** 2 * cx + 2 * (1 - t) * t * qx + t * t * x, (1 - t) ** 2 * cy + 2 * (1 - t) * t * qy + t * t * y);
+    add(x, y);
+    cx = x;
+    cy = y;
+    o.quadraticCurveTo(qx, qy, x, y);
+  };
+  ctx.bezierCurveTo = (ax: number, ay: number, bx: number, by: number, x: number, y: number) => {
+    for (const t of [0.2, 0.4, 0.6, 0.8]) {
+      const u = 1 - t;
+      add(u ** 3 * cx + 3 * u * u * t * ax + 3 * u * t * t * bx + t ** 3 * x, u ** 3 * cy + 3 * u * u * t * ay + 3 * u * t * t * by + t ** 3 * y);
+    }
+    add(x, y);
+    cx = x;
+    cy = y;
+    o.bezierCurveTo(ax, ay, bx, by, x, y);
+  };
+  ctx.arc = (x: number, y: number, r: number, a0: number, a1: number, ccw?: boolean) => {
+    arcPoints(x, y, r, r, 0, a0, a1, !!ccw);
+    o.arc(x, y, r, a0, a1, ccw);
+  };
+  ctx.ellipse = (x: number, y: number, rx: number, ry: number, rot: number, a0: number, a1: number, ccw?: boolean) => {
+    arcPoints(x, y, rx, ry, rot, a0, a1, !!ccw);
+    o.ellipse(x, y, rx, ry, rot, a0, a1, ccw);
+  };
+  ctx.arcTo = (ax: number, ay: number, bx: number, by: number, r: number) => {
+    add(ax, ay);
+    cx = bx;
+    cy = by;
+    o.arcTo(ax, ay, bx, by, r);
+  };
+  ctx.rect = (x: number, y: number, w: number, h: number) => {
+    add(x, y);
+    add(x + w, y + h);
+    add(x + w, y);
+    add(x, y + h);
+    cx = x;
+    cy = y;
+    closed = true;
+    o.rect(x, y, w, h);
+  };
+  if (o.roundRect) {
+    const roundRect = o.roundRect;
+    ctx.roundRect = ((x: number, y: number, w: number, h: number, ...rest: unknown[]) => {
+      add(x, y);
+      add(x + w, y + h);
+      cx = x;
+      cy = y;
+      closed = true;
+      roundRect(x, y, w, h, ...rest);
+    }) as CanvasRenderingContext2D["roundRect"];
+  }
+  ctx.closePath = () => {
+    closed = true;
+    o.closePath();
+  };
+  ctx.fill = ((...args: unknown[]) => {
+    if (!(args[0] instanceof Path2D)) record("fill");
+    o.fill(...args);
+  }) as CanvasRenderingContext2D["fill"];
+  ctx.stroke = ((...args: unknown[]) => {
+    if (!(args[0] instanceof Path2D)) record("stroke", strokeHalf());
+    o.stroke(...args);
+  }) as CanvasRenderingContext2D["stroke"];
+  const rectBox = (x: number, y: number, w: number, h: number, kind: StageShapeBox["kind"], inflate: number) => {
+    const sx0 = x0, sy0 = y0, sx1 = x1, sy1 = y1, sc = closed;
+    reset();
+    closed = true;
+    add(x, y);
+    add(x + w, y + h);
+    add(x + w, y);
+    add(x, y + h);
+    record(kind, inflate);
+    x0 = sx0;
+    y0 = sy0;
+    x1 = sx1;
+    y1 = sy1;
+    closed = sc;
+  };
+  ctx.fillRect = (x: number, y: number, w: number, h: number) => {
+    rectBox(x, y, w, h, "fill", 0);
+    o.fillRect(x, y, w, h);
+  };
+  ctx.strokeRect = (x: number, y: number, w: number, h: number) => {
+    rectBox(x, y, w, h, "stroke", strokeHalf());
+    o.strokeRect(x, y, w, h);
+  };
+  ctx.clip = ((...args: unknown[]) => {
+    clipped = true;
+    o.clip(...args);
+  }) as CanvasRenderingContext2D["clip"];
+  ctx.save = () => {
+    clipStack.push(clipped);
+    o.save();
+  };
+  ctx.restore = () => {
+    clipped = clipStack.pop() ?? false;
+    o.restore();
   };
 }
 
@@ -184,10 +420,40 @@ export function Stage({
       stages.add(stage);
       return () => void stages.delete(stage);
     }
-    // Isolated mode (automated checks) records every text box drawn per frame; no cost otherwise.
+    // Isolated mode (automated checks) records every text box and shape drawn per frame, and lets the
+    // checks run the stage forward in time; no cost otherwise.
     const instrument = window.__yagamiInstrument === true;
     let boxes: StageTextBox[] = [];
-    if (instrument) instrumentText(ctx, dpr, () => boxes);
+    let shapes: StageShapeBox[] = [];
+    let advancer: AdvanceStage | null = null;
+    if (instrument) {
+      instrumentText(ctx, dpr, () => boxes);
+      instrumentShapes(ctx, dpr, () => shapes);
+      advancer = {
+        advance(seconds: number) {
+          const n = Math.max(1, Math.round(seconds * 30));
+          for (let i = 0; i < n; i++) {
+            const dt = playingRef.current ? 1 / 30 : 0;
+            tRef.current += dt;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, width, height);
+            ctx.lineCap = "round";
+            ctx.lineJoin = "round";
+            boxes = [];
+            shapes = [];
+            frameRef.current(ctx, { dt, t: tRef.current, width, height });
+          }
+          window.__stageText = boxes;
+          window.__stageShapes = shapes;
+          window.__stageSize = { w: width, h: height };
+        },
+      };
+      const all = (window.__advanceStages ??= new Set());
+      all.add(advancer);
+      window.__stageAdvance ??= (seconds: number) => {
+        for (const st of window.__advanceStages ?? []) st.advance(seconds);
+      };
+    }
     let raf = 0;
     let last = performance.now();
     const tick = (now: number) => {
@@ -202,16 +468,23 @@ export function Stage({
       ctx.clearRect(0, 0, width, height);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      if (instrument) boxes = [];
+      if (instrument) {
+        boxes = [];
+        shapes = [];
+      }
       frameRef.current(ctx, { dt, t: tRef.current, width, height });
       if (instrument) {
         window.__stageText = boxes;
+        window.__stageShapes = shapes;
         window.__stageSize = { w: width, h: height };
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      if (advancer) window.__advanceStages?.delete(advancer);
+    };
   }, [width, height]);
 
   const point = (e: React.PointerEvent<HTMLCanvasElement>) => {
