@@ -91,7 +91,7 @@ export const THEMES: Palette[] = [
   },
   {
     id: "gruvbox-dark",
-    label: "Gruvbox Dark",
+    label: "gruvbox dark",
     dark: true,
     bg: "#282828",
     raised: "#32302f",
@@ -121,7 +121,7 @@ export const THEMES: Palette[] = [
   },
   {
     id: "gruvbox-light",
-    label: "Gruvbox Light",
+    label: "gruvbox light",
     dark: false,
     bg: "#fbf1c7",
     raised: "#f2e5bc",
@@ -151,7 +151,7 @@ export const THEMES: Palette[] = [
   },
   {
     id: "catppuccin-mocha",
-    label: "Catppuccin Mocha",
+    label: "catppuccin mocha",
     dark: true,
     bg: "#1e1e2e",
     raised: "#181825",
@@ -181,7 +181,7 @@ export const THEMES: Palette[] = [
   },
   {
     id: "catppuccin-latte",
-    label: "Catppuccin Latte",
+    label: "catppuccin latte",
     dark: false,
     bg: "#eff1f5",
     raised: "#e6e9ef",

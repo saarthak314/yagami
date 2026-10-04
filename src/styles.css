@@ -513,9 +513,76 @@ kbd {
 
 /* ------------------------------------------------------------------ help */
 
-.help-wrap {
+.help-wrap,
+.theme-wrap {
   position: relative;
   flex-shrink: 0;
+}
+
+.theme-menu {
+  position: absolute;
+  right: 0;
+  top: 36px;
+  z-index: 50;
+  width: 216px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  outline: none;
+}
+
+.theme-menu li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.theme-menu li.active {
+  background: var(--bg-hover);
+}
+
+.theme-swatch {
+  position: relative;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border: 1px solid;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.theme-swatch span {
+  position: absolute;
+  bottom: 4px;
+  width: 4px;
+  height: 8px;
+  border-radius: 1px;
+}
+
+.theme-swatch span:first-child {
+  left: 5px;
+}
+
+.theme-swatch span:last-child {
+  left: 11px;
+}
+
+.theme-name {
+  flex: 1;
+}
+
+.theme-check {
+  color: var(--accent);
+  font-size: 12px;
 }
 
 .popover {
@@ -1610,7 +1677,8 @@ body.resizing .resize-handle {
   .topbar .select.plain {
     height: 44px;
   }
-  .topbar .help-wrap .btn {
+  .topbar .help-wrap .btn,
+  .topbar .theme-wrap .btn {
     border-color: transparent;
     color: var(--muted);
   }

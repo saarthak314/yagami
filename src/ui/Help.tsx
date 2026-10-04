@@ -1,8 +1,6 @@
-// "?": keyboard shortcuts and the site theme.
+// "?": keyboard shortcuts.
 
-import { useEffect, useRef, useState } from "react";
-import { THEMES, type ThemeId } from "../theme/themes";
-import { savedTheme, setTheme } from "../theme/apply";
+import { useEffect, useRef } from "react";
 
 const SHORTCUTS: [string, string][] = [
   ["j / k", "Next / previous step"],
@@ -20,12 +18,6 @@ const SHORTCUTS: [string, string][] = [
 ];
 
 export function HelpButton({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
-  const [theme, setThemeState] = useState<ThemeId>(savedTheme);
-  useEffect(() => {
-    const on = (e: Event) => setThemeState((e as CustomEvent<ThemeId>).detail);
-    window.addEventListener("yagami:theme", on);
-    return () => window.removeEventListener("yagami:theme", on);
-  }, []);
   const wrap = useRef<HTMLDivElement>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -53,11 +45,11 @@ export function HelpButton({ open, onOpenChange }: { open: boolean; onOpenChange
 
   return (
     <div className="help-wrap" ref={wrap}>
-      <button ref={opener} className="btn icon" aria-expanded={open} onClick={() => onOpenChange(!open)} aria-label="Shortcuts and settings" title="Shortcuts and settings (?)">
+      <button ref={opener} className="btn icon" aria-expanded={open} onClick={() => onOpenChange(!open)} aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">
         ?
       </button>
       {open && (
-        <div className="popover" role="dialog" aria-label="Shortcuts and settings" tabIndex={-1} ref={panel}>
+        <div className="popover" role="dialog" aria-label="Keyboard shortcuts" tabIndex={-1} ref={panel}>
           <dl>
             {SHORTCUTS.map(([k, v]) => (
               <div key={k}>
@@ -68,16 +60,6 @@ export function HelpButton({ open, onOpenChange }: { open: boolean; onOpenChange
               </div>
             ))}
           </dl>
-          <label className="popover-row">
-            <span>Theme</span>
-            <select className="select" value={theme} onChange={(e) => setTheme(e.target.value as ThemeId)}>
-              {THEMES.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
       )}
     </div>

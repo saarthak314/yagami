@@ -12,6 +12,7 @@ import { BookView } from "./reader/BookView";
 import { Palette } from "./ui/Palette";
 import { Brand } from "./ui/Brand";
 import { HelpButton } from "./ui/Help";
+import { ThemeMenu } from "./ui/ThemeMenu";
 import { Search } from "./ui/icons";
 
 /** Which unit and where in it a route opens: the URL first, then saved progress, then the start. */
@@ -128,6 +129,7 @@ export function App() {
               <span className="search-label">Search</span>
               <kbd>⌘K</kbd>
             </button>
+            <ThemeMenu />
             <HelpButton open={help} onOpenChange={setHelp} />
           </header>
           <LibraryView library={library} notFound={route.book ? location.hash : undefined} />

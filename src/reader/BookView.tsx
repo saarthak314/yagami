@@ -13,6 +13,7 @@ import { Contents } from "./Contents";
 import { DemoPane, StepNav } from "../demo/DemoPane";
 import { Brand } from "../ui/Brand";
 import { HelpButton } from "../ui/Help";
+import { ThemeMenu } from "../ui/ThemeMenu";
 import { ChevronDown, ChevronUp, ListIcon, Locate, Minus, PanelRight, Plus, Search, ZoomIcon } from "../ui/icons";
 
 const ZOOMS = [0.75, 1, 1.25, 1.5, 1.75, 2];
@@ -415,6 +416,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
             <PanelRight />
           </button>
         )}
+        <ThemeMenu />
         <HelpButton open={help} onOpenChange={onHelp} />
       </header>
       {narrow && (
