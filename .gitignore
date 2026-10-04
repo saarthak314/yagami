@@ -13,3 +13,4 @@ test-results/
 # local books and their generated demos (made by `yagami <file.pdf>`)
 books/
 src/demos/
+scripts/_*.ts
