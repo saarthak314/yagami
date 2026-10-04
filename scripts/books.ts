@@ -105,7 +105,20 @@ export function pdfText(pdf: string, first: number, last: number): string {
 const decodeEntities = (s: string) =>
   s.replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#(\d+);/g, (_, n: string) => String.fromCharCode(+n)).replace(/&amp;/g, "&");
 
-/** The largest-type line(s) near the top of page 1, as a fallback title. */
+/** A line that reads like words (not a formula, an axis label or a figure fragment). */
+function wordy(text: string): boolean {
+  const chars = text.replace(/\s+/g, "");
+  if (chars.length < 4) return false;
+  const letters = (chars.match(/\p{L}/gu) ?? []).length;
+  const words = text.split(/\s+/).filter((w) => /^\p{L}{2,}/u.test(w)).length;
+  return letters / chars.length >= 0.7 && words >= 2 && !/^(fig(ure)?\.?|table|algorithm|equation)\s*\d/i.test(text) && !/%|=|\(\s*[a-z]\s*\)/i.test(text);
+}
+
+/**
+ * The largest-type wordy line(s) in the top half of page 1, as a fallback title. Formulas, figure
+ * labels and captions on page 1 are often set large too (math-heavy papers, a teaser figure), so
+ * only text that reads like words is considered.
+ */
 function firstPageTitle(pdf: string): string | undefined {
   let html: string;
   try {
@@ -113,24 +126,49 @@ function firstPageTitle(pdf: string): string | undefined {
   } catch {
     return undefined;
   }
+  const pageH = Number(/<page width="[\d.]+" height="([\d.]+)"/.exec(html)?.[1] ?? 792);
   const lines = [...html.matchAll(/<line xMin="[\d.]+" yMin="([\d.]+)" xMax="[\d.]+" yMax="([\d.]+)">([\s\S]*?)<\/line>/g)]
     .map((m) => ({ top: +m[1], h: +m[2] - +m[1], text: decodeEntities([...m[3].matchAll(/>([^<]+)<\/word>/g)].map((w) => w[1]).join(" ").trim()) }))
-    .filter((l) => l.text.length > 2 && !/arxiv|preprint|copyright|©|doi|http/i.test(l.text));
+    .filter((l) => l.text.length > 2 && !/arxiv|preprint|copyright|©|doi|http|proceedings|conference|journal|vol\.|issn/i.test(l.text));
   if (!lines.length) return undefined;
-  const maxH = Math.max(...lines.map((l) => l.h));
   // A title is set clearly larger than the body text; a page without one (an excerpt, a
   // chapter scan) would otherwise yield body lines, so let the caller fall back to the file name.
   const body = [...lines.map((l) => l.h)].sort((a, b) => a - b)[Math.floor(lines.length / 2)];
-  if (maxH < 1.2 * body) return undefined;
-  const title = lines
-    .filter((l) => l.h > 0.9 * maxH)
-    .sort((a, b) => a.top - b.top)
-    .slice(0, 3)
-    .map((l) => l.text)
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return title.length <= 120 && !/[.;]\s+\S/.test(title) ? title : undefined;
+  const candidates = lines.filter((l) => l.top < pageH * 0.5 && wordy(l.text));
+  if (!candidates.length) return undefined;
+  const maxH = Math.max(...candidates.map((l) => l.h));
+  if (maxH < 1.2 * body) {
+    // Old typesetting and OCR'd scans: the title is often in capitals at body size. Take the first
+    // all-caps wordy line(s) near the top (not a running head with a page number).
+    const caps = candidates
+      .filter((l) => l.top < pageH * 0.4 && l.text === l.text.toUpperCase() && !/\d/.test(l.text))
+      .sort((a, b) => a.top - b.top);
+    // The first title line has a few words; continuation lines may be short ("THE ENTSCHEIDUNGSPROBLEM").
+    const first = caps.findIndex((l) => l.text.split(/\s+/).length >= 3);
+    if (first < 0) return undefined;
+    caps.splice(0, first);
+    const block = [caps[0]];
+    for (const l of caps.slice(1)) if (block.length < 3 && l.top - block[block.length - 1].top < l.h * 2.6) block.push(l);
+    const t = block.map((l) => l.text).join(" ").replace(/\s+/g, " ").trim();
+    return t.length <= 140 ? t.toLowerCase().replace(/(^|[\s:—-])(\p{L})/gu, (_, a: string, b: string) => a + b.toUpperCase()) : undefined;
+  }
+  // The title block: the largest wordy lines, top to bottom, while they stay together.
+  const big = candidates.filter((l) => l.h > 0.9 * maxH).sort((a, b) => a.top - b.top);
+  const block = [big[0]];
+  for (const l of big.slice(1)) if (block.length < 3 && l.top - block[block.length - 1].top < maxH * 2.6) block.push(l);
+  const title = block.map((l) => l.text).join(" ").replace(/\s+/g, " ").trim();
+  return title.length <= 140 && !/[.;]\s+\S/.test(title) ? title : undefined;
+}
+
+/** PDF metadata titles are often junk: a TeX/Word file name, "untitled", or a bare token. */
+function usableMetaTitle(title: string | undefined, pdf: string): string | undefined {
+  const t = title?.trim();
+  if (!t || t.length <= 3) return undefined;
+  if (/^(untitled|microsoft word|title|document|slide|presentation)\b/i.test(t)) return undefined;
+  if (/\.(dvi|tex|pdf|docx?|ps|eps|indd|rtf|odt|pages)$/i.test(t)) return undefined;
+  if (!/\s/.test(t) && t.toLowerCase() === path.basename(pdf, path.extname(pdf)).toLowerCase()) return undefined;
+  if (!/\s/.test(t) && t.length < 20) return undefined; // a single short token is rarely a real title
+  return t;
 }
 
 export function detectSource(pdf: string): SourceInfo {
@@ -141,7 +179,7 @@ export function detectSource(pdf: string): SourceInfo {
   // Most sampled pages need a real text layer (≥ 200 chars); one OCR'd preface doesn't make a scanned book "text".
   const withText = samples.filter((p) => pdfText(pdf, p, p).replace(/\s+/g, "").length >= 200).length;
   const kind: SourceInfo["kind"] = samples.length && withText / samples.length >= 0.6 ? "text" : "scanned";
-  const metaTitle = info.Title && !/^(untitled|microsoft word|\s*$)/i.test(info.Title) && info.Title.length > 3 ? info.Title : undefined;
+  const metaTitle = usableMetaTitle(info.Title, pdf);
   const title = metaTitle ?? (kind === "text" ? firstPageTitle(pdf) : undefined) ?? path.basename(pdf, path.extname(pdf)).replace(/[-_]+/g, " ");
   return { pages, title, author: info.Author || undefined, kind };
 }
