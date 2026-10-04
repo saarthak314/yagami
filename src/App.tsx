@@ -1,0 +1,129 @@
+// Routes: `#/` the library, `#/<book>/<unit>/<section>` a book. The command
+// palette (⌘K or /) and the help panel (?) work everywhere.
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { Library } from "./types";
+import { loadLibrary } from "./lib/data";
+import { hashFor, parseHash, type Route } from "./lib/route";
+import type { Target } from "./lib/search";
+import { load, progressKey, type Progress } from "./lib/store";
+import { LibraryView } from "./library/Library";
+import { BookView } from "./reader/BookView";
+import { Palette } from "./ui/Palette";
+import { Brand } from "./ui/Brand";
+import { HelpButton } from "./ui/Help";
+import { Search } from "./ui/icons";
+
+/** Which unit and where in it a route opens: the URL first, then saved progress, then the start. */
+function resolve(lib: Library, r: Route) {
+  const book = lib.books.find((b) => b.slug === r.book);
+  if (!book || book.units.length === 0) return null;
+  const saved = load<Progress | null>(progressKey(book.slug), null);
+  const unit = book.units.find((u) => u.id === r.unit) ?? book.units.find((u) => u.id === saved?.unit) ?? book.units[0];
+  const section = r.section ?? (saved?.unit === unit.id ? saved.section : undefined);
+  return { book: book.slug, unit: unit.id, section };
+}
+
+export function App() {
+  const [library, setLibrary] = useState<Library | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [route, setRoute] = useState<Route & { anchor?: string; seq: number }>(() => ({ ...parseHash(), seq: 0 }));
+  const [palette, setPalette] = useState(false);
+  const [help, setHelp] = useState(false);
+  // Anchor for the next hashchange (demos have no URL of their own).
+  const nextAnchor = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    loadLibrary()
+      .then(setLibrary)
+      .catch((e) => setError(String(e.message ?? e)));
+  }, []);
+
+  useEffect(() => {
+    const on = () => {
+      const anchor = nextAnchor.current;
+      nextAnchor.current = undefined;
+      setRoute((r) => ({ ...parseHash(), anchor, seq: r.seq + 1 }));
+    };
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+
+  const navigate = useCallback((t: Target) => {
+    setPalette(false);
+    const h = hashFor(t);
+    if (location.hash === h) setRoute((r) => ({ ...parseHash(h), anchor: t.anchor, seq: r.seq + 1 }));
+    else {
+      nextAnchor.current = t.anchor;
+      location.hash = h;
+    }
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      const typing = el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT";
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setHelp(false);
+        setPalette((v) => !v);
+      } else if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+      else if (e.key === "/") {
+        e.preventDefault();
+        setHelp(false);
+        setPalette(true);
+      } else if (e.key === "?") setHelp((v) => !v);
+      else if (e.key === "Escape") setHelp(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  if (!library) {
+    return (
+      <div className="app">
+        <header className="topbar">
+          <Brand />
+        </header>
+        {error && <p className="quiet">{error}</p>}
+      </div>
+    );
+  }
+
+  const at = route.book ? resolve(library, route) : null;
+  const anchor = route.anchor;
+
+  return (
+    <>
+      {at ? (
+        <BookView
+          key={`${at.book}/${at.unit}`}
+          library={library}
+          book={at.book}
+          unit={at.unit}
+          target={{ section: anchor ? undefined : at.section, anchor, seq: route.seq }}
+          onNavigate={navigate}
+          onSearch={() => setPalette(true)}
+          help={help}
+          onHelp={setHelp}
+          modal={palette}
+        />
+      ) : (
+        <div className="app">
+          <header className="topbar">
+            <Brand />
+            <span className="spacer" />
+            <button className="btn search-btn" onClick={() => setPalette(true)} aria-label="Search" title="Search (⌘K)">
+              <Search />
+              <span className="search-label">Search</span>
+              <kbd>⌘K</kbd>
+            </button>
+            <HelpButton open={help} onOpenChange={setHelp} />
+          </header>
+          <LibraryView library={library} />
+        </div>
+      )}
+      {palette && <Palette library={library} near={at ?? undefined} onGo={navigate} onClose={() => setPalette(false)} />}
+    </>
+  );
+}

@@ -1,0 +1,27 @@
+{
+  "id": "softmax-temperature",
+  "title": "Softmax temperature",
+  "component": "SoftmaxTemperature",
+  "brief": "Five queries ('the', 'a', 'on', 'by', 'it') and six candidate tokens ('cat', 'dog', 'sat', 'mat', 'ran', 'sun'), each a vector of width 8 drawn from N(0, 0.9²) with a fixed seed (rng(7): queries first, then keys). The score of token j for query i is the dot product q_i·k_j. Each row of scores becomes a probability distribution p = softmax(scores / τ). Left half: a 5×6 heatmap of p (sequential ramp, domain 0..1, values printed in the cells), rows labelled by query, columns by token. A highlight outlines one row and sweeps down the rows, 1.6 s per row, looping (the 'sweep' toggle pauses the sweep). Right half: a chip naming the highlighted query, τ in the corner, and a bar chart of that row's probabilities on a fixed 0..1 axis with the most likely token highlighted; optionally the raw scores under the bars ('showScores'). Controls: temperature τ (0.1–5), show scores, sweep. Presets: sharp (τ = 0.3), neutral (τ = 1), flat (τ = 3). Readouts: entropy of the highlighted row in bits (0 for a one-hot row, log₂ 6 ≈ 2.585 for uniform), its largest probability, its sum (always 1.000) and the most likely token.",
+  "presets": [
+    { "id": "sharp", "label": "Sharp (τ = 0.3)", "params": { "tau": 0.3, "showScores": false, "sweep": true } },
+    { "id": "neutral", "label": "Neutral (τ = 1)", "params": { "tau": 1, "showScores": true, "sweep": true } },
+    { "id": "flat", "label": "Flat (τ = 3)", "params": { "tau": 3, "showScores": false, "sweep": true } }
+  ],
+  "controls": [
+    { "type": "slider", "id": "tau", "label": "Temperature τ", "min": 0.1, "max": 5, "step": 0.05 },
+    { "type": "toggle", "id": "showScores", "label": "Show scores" },
+    { "type": "toggle", "id": "sweep", "label": "Sweep rows" }
+  ],
+  "readouts": [
+    { "id": "entropy", "label": "Entropy" },
+    { "id": "max", "label": "$\\max_j p_j$" },
+    { "id": "sum", "label": "$\\sum_j p_j$" },
+    { "id": "best", "label": "Most likely" }
+  ],
+  "beats": [
+    { "anchor": "ref-p1", "preset": "neutral", "caption": "Each row of scores becomes a distribution over the six tokens, and every row sums to 1." },
+    { "anchor": "ref-p2", "preset": "sharp", "caption": "Dividing by a small $\\tau$ stretches the score gaps, so each row puts nearly all its weight on one token." },
+    { "anchor": "ref-p3", "preset": "flat", "caption": "A large $\\tau$ shrinks the gaps; the rows flatten towards $1/6$ and the entropy approaches $\\log_2 6$." }
+  ]
+}

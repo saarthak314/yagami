@@ -1,0 +1,44 @@
+{
+  "id": "work-gravity",
+  "title": "Work done by gravity",
+  "component": "WorkGravity",
+  "brief": "A body is carried along a path in N small steps and the work W = Σ F·ds is summed step by step, shown live next to the value predicted from the end points alone. Preset 'uniform': uniform downward gravity (mg = 1 per length unit); two paths A (curved) and B (straight) from point 1 to point 2 are traversed together; both totals equal mg(z1 − z2). With the stepped toggle each step becomes a vertical then a horizontal leg; only the vertical legs do work. Preset 'central': a closed loop near a point mass M with F = GMm/r² toward M; the expected value is GMm(1/r − 1/r1); the stepped toggle replaces each chord by a radial leg and a circular arc, the arcs doing no work, so the total around the loop returns to zero.",
+  "presets": [
+    { "id": "uniform", "label": "Uniform gravity: two paths", "params": { "steps": 12, "speed": 0.12, "radial": false } },
+    { "id": "central", "label": "Central force: closed loop", "params": { "steps": 10, "speed": 0.1, "radial": true } }
+  ],
+  "controls": [
+    { "type": "slider", "id": "steps", "label": "Number of steps", "min": 3, "max": 60, "step": 1 },
+    { "type": "slider", "id": "speed", "label": "Speed", "min": 0.02, "max": 0.5, "step": 0.01 },
+    { "type": "toggle", "id": "radial", "label": "Radial + circular steps" }
+  ],
+  "readouts": [
+    { "id": "w", "label": "$W$ so far" },
+    { "id": "expected", "label": "from end points" },
+    { "id": "r", "label": "$r$" }
+  ],
+  "beats": [
+    {
+      "anchor": "13-2-p1",
+      "preset": "uniform",
+      "caption": "Uniform gravity points straight down, so only the vertical part of each step does work. Paths A and B end with the same total, $mg(z_1 - z_2)$."
+    },
+    {
+      "anchor": "13-2-p3",
+      "preset": "uniform",
+      "caption": "Break each path into vertical and horizontal steps. The horizontal steps add nothing; the vertical ones add up to the drop.",
+      "params": { "radial": true, "steps": 20 }
+    },
+    {
+      "anchor": "13-2-p4",
+      "preset": "central",
+      "caption": "Around a central mass, a smooth loop can be followed by radial and circular steps. The circular steps do no work and the radial ones cancel, so the loop totals zero."
+    },
+    {
+      "anchor": "13-2-p5",
+      "preset": "central",
+      "caption": "With finer steps the stepped path hugs the smooth loop, and the total still comes back to zero.",
+      "params": { "steps": 40 }
+    }
+  ]
+}

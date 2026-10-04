@@ -1,0 +1,28 @@
+{
+  "id": "binary-search",
+  "title": "Binary search",
+  "component": "BinarySearch",
+  "brief": "A sorted array of n distinct keys (n = 7–16) generated from a fixed seed: start at 2 + ⌊5·u⌋ and add gaps of 2 + ⌊7·u⌋ (u from rng(seed)), so key + 1 is never itself a key. The target is a[targetIndex], or a[targetIndex] + 1 when 'absent' is on (a value that falls between two keys). Precompute every state of the standard search: start (lo = 0, hi = n − 1, no mid), then one state per comparison (mid = ⌊(lo + hi)/2⌋, compare a[mid] with the target, then lo = mid + 1 or hi = mid − 1), then, if the range empties, a final 'not present' state with lo > hi. Show one state per 1/speed seconds, hold the final state ~1.6 s, then loop. Drawing: a line 'search for [target chip] in a sorted array of n keys'; the array as a centred row of square cells with index labels (draw.cells), cells outside [lo, hi] muted, the compared cell active (accent), all live cells dimmed to 'done' once found; a 'mid' pointer from above in the accent colour, 'lo' and 'hi' pointers from below (a single 'lo = hi' pointer when they coincide); under the array one sentence describing the step ('a[7] = 31 < 42: discard the left half, lo = 8') and the loop invariant in faint text. Controls: n, which key is the target, absent toggle, seed, speed (steps/s). Presets: found (n = 15, target index 11) and not present (n = 15, absent after index 4). Readouts: comparisons so far, the worst-case bound ⌈log₂(n+1)⌉, the live range size hi − lo + 1, and the result.",
+  "presets": [
+    { "id": "found", "label": "Target present", "params": { "n": 15, "targetIndex": 11, "absent": false, "seed": 3, "speed": 1 } },
+    { "id": "absent", "label": "Target not present", "params": { "n": 15, "targetIndex": 4, "absent": true, "seed": 3, "speed": 1 } }
+  ],
+  "controls": [
+    { "type": "slider", "id": "n", "label": "Keys n", "min": 7, "max": 16, "step": 1 },
+    { "type": "slider", "id": "targetIndex", "label": "Target is key", "min": 0, "max": 15, "step": 1 },
+    { "type": "toggle", "id": "absent", "label": "Target between keys (absent)" },
+    { "type": "slider", "id": "seed", "label": "Seed", "min": 1, "max": 20, "step": 1 },
+    { "type": "slider", "id": "speed", "label": "Steps per second", "min": 0.5, "max": 3, "step": 0.25 }
+  ],
+  "readouts": [
+    { "id": "comparisons", "label": "Comparisons" },
+    { "id": "bound", "label": "$\\lceil \\log_2(n+1) \\rceil$" },
+    { "id": "live", "label": "Live range $hi - lo + 1$" },
+    { "id": "result", "label": "Result" }
+  ],
+  "beats": [
+    { "anchor": "ref-p1", "preset": "found", "caption": "Each comparison with the middle key rules out half of the live range, so the range shrinks from 15 to 7 to 3 to 1." },
+    { "anchor": "ref-p2", "preset": "absent", "caption": "When the target is missing, the range empties with lo just past hi, and lo is where the target would be inserted." },
+    { "anchor": "ref-p3", "preset": "found", "caption": "Try any target: the comparison count never exceeds $\\lceil \\log_2(n+1) \\rceil$, which is 4 for 15 keys.", "params": { "targetIndex": 0 } }
+  ]
+}

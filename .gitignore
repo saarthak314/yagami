@@ -1,0 +1,15 @@
+node_modules
+dist
+.DS_Store
+# copyrighted source material and derived text/figures - never commit
+*.pdf
+reference.mp4
+frames/
+work/
+public/books/
+.cache/
+test-results/
+
+# local books and their generated demos (made by `yagami <file.pdf>`)
+books/
+src/demos/
