@@ -60,6 +60,7 @@ export function applyTheme(id: string | null | undefined): Palette {
     "--muted": p.muted,
     "--faint": p.faint,
     "--accent": p.accent,
+    "--accent2": p.accent2,
     "--accent-soft": rgba(p.accent, p.dark ? 0.08 : 0.07),
     "--accent-flash": rgba(p.accent, p.dark ? 0.24 : 0.18),
     "--line": p.line,

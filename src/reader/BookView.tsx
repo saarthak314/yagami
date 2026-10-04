@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Library, Unit } from "../types";
-import { beatsInOrder, isNumbered, loadUnit, planFor } from "../lib/data";
+import { beatsInOrder, isNumbered, loadUnit, planFor, useDemosVersion } from "../lib/data";
 import { hashFor } from "../lib/route";
 import type { Target } from "../lib/search";
 import { LAST_BOOK, RESUME, load, progressKey, save, useStored, type Progress } from "../lib/store";
@@ -56,10 +56,10 @@ function ZoomMenu({ fit, zoom, onPick, compact }: { fit: Fit; zoom: number; onPi
       window.removeEventListener("keydown", esc);
     };
   }, [open]);
-  const label = zoom === 1 ? (fit === "text" ? "Fit text" : "Fit page") : `${Math.round(zoom * 100)}%`;
+  const label = zoom === 1 ? (fit === "text" ? "fit text" : "fit page") : `${Math.round(zoom * 100)}%`;
   const items: [string, Fit, number][] = [
-    ["Fit page", "page", 1],
-    ["Fit text", "text", 1],
+    ["fit page", "page", 1],
+    ["fit text", "text", 1],
     ["125%", fit, 1.25],
     ["150%", fit, 1.5],
     ["175%", fit, 1.75],
@@ -72,14 +72,14 @@ function ZoomMenu({ fit, zoom, onPick, compact }: { fit: Fit; zoom: number; onPi
           <ZoomIcon />
         </button>
       ) : (
-        <button className="zoom-level" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)} title="Page size">
+        <button className="zoom-level" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)} title="page size">
           {label}
         </button>
       )}
       {open && (
         <div className="menu" role="menu">
           {items.map(([l, f, z]) => {
-            const on = l.startsWith("Fit") ? zoom === 1 && f === fit : zoom === z;
+            const on = l.startsWith("fit") ? zoom === 1 && f === fit : zoom === z;
             return (
               <button
                 key={l}
@@ -155,7 +155,9 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
   const [resetKey, setResetKey] = useState(0);
   const [flashKey, setFlashKey] = useState(0);
 
-  const beats = useMemo(() => (unit ? beatsInOrder(planFor(`${slug}/${unitId}`), unit) : []), [unit, slug, unitId]);
+  // New plans and demos (a build in progress) arrive by hot update; recompute on them.
+  const demosVersion = useDemosVersion();
+  const beats = useMemo(() => (unit ? beatsInOrder(planFor(`${slug}/${unitId}`), unit) : []), [unit, slug, unitId, demosVersion]);
   const markers = useMemo<Marker[]>(() => {
     const seen = new Map<string, number>();
     const totals = new Map<string, number>();
@@ -366,7 +368,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
       <header className="topbar">
         <Brand wordmark={!narrow} />
         <span className="topbar-sep" aria-hidden />
-        <button className="btn icon ghost" aria-pressed={tocOpen} onClick={() => setTocOpen((v) => !v)} aria-label="Contents" title="Contents (t)">
+        <button className="btn icon ghost" aria-pressed={tocOpen} onClick={() => setTocOpen((v) => !v)} aria-label="Contents" title="contents (t)">
           <ListIcon />
         </button>
         <select className="select plain book-select" aria-label="Book" value={slug} onChange={(e) => onNavigate({ book: e.target.value })} title={book.title}>
@@ -378,7 +380,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
         </select>
         {!narrow && chapterSelect}
         {!narrow && section && (
-          <button className="crumb" onClick={() => setTocOpen((v) => !v)} title="Contents (t)">
+          <button className="crumb" onClick={() => setTocOpen((v) => !v)} title="contents (t)">
             <Inline md={sectionLabel(section)} />
           </button>
         )}
@@ -388,18 +390,18 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
           <ZoomMenu fit={fit} zoom={zoom} onPick={pickZoom} compact />
         ) : (
           <div className="zoom" role="group" aria-label="Page size">
-            <button className="btn icon ghost" onClick={() => zoomBy(-1)} disabled={zoom <= ZOOMS[0]} aria-label="Zoom out" title="Zoom out (−)">
+            <button className="btn icon ghost" onClick={() => zoomBy(-1)} disabled={zoom <= ZOOMS[0]} aria-label="Zoom out" title="zoom out (−)">
               <Minus />
             </button>
             <ZoomMenu fit={fit} zoom={zoom} onPick={pickZoom} compact={false} />
-            <button className="btn icon ghost" onClick={() => zoomBy(1)} disabled={zoom >= ZOOMS[ZOOMS.length - 1]} aria-label="Zoom in" title="Zoom in (+)">
+            <button className="btn icon ghost" onClick={() => zoomBy(1)} disabled={zoom >= ZOOMS[ZOOMS.length - 1]} aria-label="Zoom in" title="zoom in (+)">
               <Plus />
             </button>
           </div>
         )}
-        <button className={`btn search-btn${narrow ? " icon ghost" : ""}`} onClick={onSearch} aria-label="Search" title="Search (⌘K)">
+        <button className={`btn search-btn${narrow ? " icon ghost" : ""}`} onClick={onSearch} aria-label="Search" title="search (⌘k)">
           <Search />
-          {!narrow && <span className="search-label">Search</span>}
+          {!narrow && <span className="search-label">search</span>}
           {!narrow && <kbd>⌘K</kbd>}
         </button>
         {!narrow && hasDemos && (
@@ -411,7 +413,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
               setDemoHidden((v) => !v);
             }}
             aria-label={demoHidden ? "Show demos" : "Hide demos"}
-            title={demoHidden ? "Show demos (d)" : "Hide demos (d)"}
+            title={demoHidden ? "show demos (d)" : "hide demos (d)"}
           >
             <PanelRight />
           </button>
@@ -483,7 +485,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
                 role="separator"
                 aria-orientation="vertical"
                 aria-label="Resize demo pane"
-                title="Drag to resize · double-click to reset"
+                title="drag to resize · double-click to reset"
                 onPointerDown={onResizeStart}
                 onDoubleClick={() => setDemoW(null)}
               />
@@ -539,7 +541,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
               </button>
               {sheetOpen && paneProps.step.total > 1 && <StepNav step={paneProps.step} />}
               {sheetOpen && (
-                <button className="btn icon ghost" onClick={showInText} aria-label="Show in text" title="Show this paragraph in the text">
+                <button className="btn icon ghost" onClick={showInText} aria-label="Show in text" title="show this paragraph in the text">
                   <Locate />
                 </button>
               )}

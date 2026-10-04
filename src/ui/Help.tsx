@@ -14,7 +14,14 @@ const SHORTCUTS: [string, string][] = [
   ["search", "⌘k"],
 ];
 
-export function HelpButton({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+/** Outside a book only search applies. */
+const LIBRARY_SHORTCUTS: [string, string][] = [
+  ["search", "⌘k  /"],
+  ["shortcuts", "?"],
+];
+
+export function HelpButton({ open, onOpenChange, context = "reader" }: { open: boolean; onOpenChange: (v: boolean) => void; context?: "reader" | "library" }) {
+  const list = context === "library" ? LIBRARY_SHORTCUTS : SHORTCUTS;
   const wrap = useRef<HTMLDivElement>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -42,14 +49,14 @@ export function HelpButton({ open, onOpenChange }: { open: boolean; onOpenChange
 
   return (
     <div className="help-wrap" ref={wrap}>
-      <button ref={opener} className="btn icon" aria-expanded={open} onClick={() => onOpenChange(!open)} aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">
+      <button ref={opener} className="btn icon" aria-expanded={open} onClick={() => onOpenChange(!open)} aria-label="Keyboard shortcuts" title="shortcuts (?)">
         ?
       </button>
       {open && (
         <div className="popover" role="dialog" aria-label="Keyboard shortcuts" tabIndex={-1} ref={panel}>
           <dl>
-            {SHORTCUTS.map(([what, key]) => (
-              <div key={what}>
+            {list.map(([what, key]) => (
+              <div key={`${what}${key}`}>
                 <dt>{what}</dt>
                 <dd>
                   <kbd>{key}</kbd>

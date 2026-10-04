@@ -5,7 +5,6 @@
 //   yagami                          open the site
 //   yagami fix <demo> "<problem>"   fix a demo by describing what's wrong
 
-import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -20,9 +19,7 @@ const { color, createUi, fit, humanize, paint, servingLine, termWidth } = await 
 const { BASE, bookUrl, openUrl, startSite } = await import("../cli/server");
 type Site = import("../cli/server").Site;
 const { pick } = await import("../cli/picker");
-const bookLib = await import("../scripts/books");
-/** The pipeline helpers, with a missing books/ folder treated as an empty library. */
-const books = { ...bookLib, listBooks: () => (fs.existsSync("books") ? bookLib.listBooks() : []) };
+const { listBooks, draftBook, finalizeBook, builtUnits, defaultUnits } = await import("../scripts/create-book");
 type BookConfig = import("../src/types").BookConfig;
 type DemoPlan = import("../src/types").DemoPlan;
 
@@ -52,19 +49,7 @@ function fail(msg: string, spaced = true): never {
   process.exit(1);
 }
 
-const sha1 = (file: string) => crypto.createHash("sha1").update(fs.readFileSync(file)).digest("hex");
 const has = (bin: string) => spawnSync("which", [bin]).status === 0;
-
-function slugify(s: string): string {
-  const stop = new Set(["a", "an", "the", "of", "on", "for", "and", "in", "to", "with"]);
-  const words = s.toLowerCase().normalize("NFKD").replace(/[^\w\s-]/g, "").split(/[\s_-]+/).filter(Boolean);
-  return (words.filter((w) => !stop.has(w)).slice(0, 5).join("-") || "book").slice(0, 48);
-}
-
-function shortTitle(title: string, max = 34) {
-  if (title.length <= max) return title;
-  return title.slice(0, max).replace(/\s+\S*$/, "").replace(/[:,;\s-]+$/, "") + "…";
-}
 
 // ---------------------------------------------------------------------------
 // Preflight: everything that would fail later, checked before slow or paid work
@@ -185,47 +170,19 @@ async function make(file: string) {
   const pdf = await preflightPdf(file);
   const done = reading(path.basename(pdf));
 
-  // Same PDF as an existing book? (compare sizes first; hashing is only for candidates)
-  const size = fs.statSync(pdf).size;
-  const candidates = books.listBooks().filter((b) => fs.existsSync(b.source.pdf) && fs.statSync(b.source.pdf).size === size);
-  const hash = candidates.length ? sha1(pdf) : "";
-  const existing = candidates.find((b) => sha1(b.source.pdf) === hash);
-
-  let book: BookConfig;
-  let pages: number;
-  let fresh = false;
-  if (existing) {
-    book = existing;
-    pages = Math.max(...book.units.map((u) => u.pages[1]));
-  } else {
-    const src = books.detectSource(pdf);
-    if (src.kind === "scanned" && !has("tesseract")) {
-      done();
-      fail("tesseract not found — it reads scanned pdfs (macOS: brew install tesseract)");
-    }
-    let slug = slugify(src.title);
-    for (let n = 2; fs.existsSync(path.join("books", slug)); n++) slug = `${slugify(src.title)}-${n}`;
-    const dir = path.join("books", slug);
-    book = {
-      slug,
-      title: src.title,
-      short: shortTitle(src.title),
-      ...(src.author ? { subtitle: src.author } : {}),
-      source: { pdf: path.join(dir, "source.pdf"), kind: src.kind },
-      domain: "cs",
-      recolor: src.kind === "text" ? "lightness" : "invert",
-      units: books.suggestUnits(pdf).map((u) => ({ ...u, title: u.title || src.title })),
-    };
-    pages = src.pages;
-    fresh = true;
+  // The book made from this PDF before, or a proposed new one (fast; nothing written yet).
+  const { book, pages, fresh } = draftBook(pdf);
+  if (fresh && book.source.kind === "scanned" && !has("tesseract")) {
+    done();
+    fail("tesseract not found — it reads scanned pdfs (macOS: brew install tesseract)");
   }
   done();
 
   // Long textbooks: choose chapters (others can be added later by running again).
   let selected = book.units.map((u) => u.id);
   if (book.units.length > 6) {
-    const built = new Set(book.units.filter((u) => fs.existsSync(path.join("src/demos", book.slug, u.id, "plan.json"))).map((u) => u.id));
-    const preset = built.size ? built : new Set(book.units.slice(0, 3).map((u) => u.id));
+    const built = builtUnits(book);
+    const preset = new Set(defaultUnits(book));
     if (process.stdin.isTTY && process.stdout.isTTY) {
       console.log("");
       const picked = await pick(
@@ -260,20 +217,16 @@ async function make(file: string) {
       ? async ({ header, emit }) => {
           // The one slow step before the pipeline: ask a model which subject this is.
           emit({ type: "stage", unit: "", stage: "init", status: "start", detail: "detecting the subject" });
-          book.domain = await books.detectDomain(books.sampleText(pdf));
+          await finalizeBook(pdf, book);
           emit({ type: "stage", unit: "", stage: "init", status: "done" });
           header(meta(book.domain));
-          const dir = path.join("books", book.slug);
-          fs.mkdirSync(dir, { recursive: true });
-          fs.copyFileSync(pdf, path.join(dir, "source.pdf"));
-          fs.writeFileSync(path.join(dir, "book.json"), JSON.stringify(book, null, 2) + "\n");
         }
       : undefined,
   });
 }
 
 async function open() {
-  if (!books.listBooks().length) {
+  if (!listBooks().length) {
     console.log(`\n${BRAND}\n\n  ${color.fg("your library is empty")} ${color.dim("— add a paper or textbook:")}\n\n${USAGE}\n`);
     return;
   }
@@ -287,7 +240,7 @@ async function fix(query: string | undefined, problem: string | undefined) {
   // Find the demo by id or by words of its title, across every book.
   const words = query.toLowerCase().split(/\s+/);
   const hits: { book: BookConfig; unit: string; id: string; title: string }[] = [];
-  for (const book of books.listBooks())
+  for (const book of listBooks())
     for (const u of book.units) {
       const f = path.join("src/demos", book.slug, u.id, "plan.json");
       if (!fs.existsSync(f)) continue;

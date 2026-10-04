@@ -63,7 +63,7 @@ export function Palette({
           aria-expanded="true"
           aria-autocomplete="list"
           aria-label="Search"
-          placeholder="Search books, chapters, sections, demos and themes"
+          placeholder="search books, chapters, sections, demos and themes"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
@@ -106,7 +106,7 @@ export function Palette({
               </span>
             </li>
           ))}
-          {results.length === 0 && <li className="palette-empty">{index.length === 0 ? "The library is empty." : `Nothing matches “${query}”.`}</li>}
+          {results.length === 0 && <li className="palette-empty">{index.length === 0 ? "the library is empty." : `nothing matches “${query}”.`}</li>}
         </ul>
       </div>
     </div>

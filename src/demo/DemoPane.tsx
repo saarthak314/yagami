@@ -32,7 +32,7 @@ class DemoBoundary extends Component<{ children: ReactNode; onError?: (e: unknow
     this.props.onError?.(error);
   }
   render() {
-    return this.state.failed ? <p className="demo-quiet">This demo failed to load.</p> : this.props.children;
+    return this.state.failed ? <p className="demo-quiet">this demo failed to load.</p> : this.props.children;
   }
 }
 
@@ -91,7 +91,7 @@ export function DemoPane(props: Props) {
   if (!beat) {
     return (
       <section className="demo-pane">
-        <p className="demo-quiet">{props.emptyText ?? "No demos for this unit yet."}</p>
+        <p className="demo-quiet">{props.emptyText ?? "no demos for this chapter yet."}</p>
       </section>
     );
   }
@@ -163,7 +163,7 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
             <div className="stage-scale" style={scale < 1 ? { width: logical.w, height: logical.h, transform: `scale(${scale})` } : undefined}>
             <DemoBoundary key={`${demo.id}`} onError={onError}>
               {Demo ? (
-                <Suspense fallback={null}>
+                <Suspense fallback={<div className="skel stage-skel" aria-label="loading the demo" />}>
                   <Demo
                     params={params}
                     preset={preset?.id ?? ""}
@@ -187,21 +187,21 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
       <div className="demo-controls">
         <div className="row">
           <button className="btn" onClick={onTogglePlay} aria-pressed={!playing}>
-            {playing ? "Pause" : "Play"}
+            {playing ? "pause" : "play"}
           </button>
           <button className="btn" onClick={onRestart}>
-            Restart
+            restart
           </button>
           {dirty && (
             <button
               className="btn"
-              title="Put back the values this paragraph uses"
+              title="put back the values this paragraph uses"
               onClick={() => {
                 setEdits({});
                 setPresetOverride(null);
               }}
             >
-              Reset to text
+              reset to text
             </button>
           )}
         </div>
@@ -210,7 +210,7 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
           <div className="controls-grid">
             {demo.presets.length > 1 && (
               <label className="control setup">
-                <span className="control-label">Setup</span>
+                <span className="control-label">setup</span>
                 <select
                   className="select"
                   aria-label="Setup"
@@ -255,7 +255,15 @@ function MissingDemo({ name, onError }: { name: string; onError?: (e: unknown) =
   useEffect(() => {
     onError?.(new Error(`Demo component not found: ${name}`));
   }, [name, onError]);
-  return <p className="demo-quiet">This demo failed to load.</p>;
+  // The verifier (isolated mode) treats this as a failure; in the reader it means the
+  // demo is planned but its code isn't written yet (a build is still running).
+  if (onError) return <p className="demo-quiet">this demo failed to load.</p>;
+  return (
+    <div className="stage-pending">
+      <div className="skel stage-skel" aria-hidden />
+      <p className="demo-quiet">this demo is still being made — it appears here when it's ready.</p>
+    </div>
+  );
 }
 
 /**
@@ -330,17 +338,17 @@ export function DemoTitleRow({ beat, step, onShowInText, pinned, onTogglePin, fo
       <span className="spacer" />
       {step && step.total > 1 && <StepNav step={step} />}
       {onShowInText && (
-        <button className="btn icon ghost" onClick={onShowInText} aria-label="Show in text" title="Show this paragraph in the text">
+        <button className="btn icon ghost" onClick={onShowInText} aria-label="Show in text" title="show this paragraph in the text">
           <Locate />
         </button>
       )}
       {onTogglePin && (
-        <button className="btn icon ghost" onClick={onTogglePin} aria-pressed={pinned} aria-label="Pin demo" title={pinned ? "Unpin: follow the text again (h)" : "Pin: keep this demo while scrolling (h)"}>
+        <button className="btn icon ghost" onClick={onTogglePin} aria-pressed={pinned} aria-label="Pin demo" title={pinned ? "unpin: follow the text again (h)" : "pin: keep this demo while scrolling (h)"}>
           <Pin />
         </button>
       )}
       {onToggleFocus && (
-        <button className="btn icon ghost" onClick={onToggleFocus} aria-pressed={focused} aria-label={focused ? "Exit focus" : "Focus on demo"} title={focused ? "Back to reading (Esc)" : "Focus on the demo (f)"}>
+        <button className="btn icon ghost" onClick={onToggleFocus} aria-pressed={focused} aria-label={focused ? "Exit focus" : "Focus on demo"} title={focused ? "back to reading (esc)" : "focus on the demo (f)"}>
           {focused ? <Collapse /> : <Expand />}
         </button>
       )}
@@ -352,13 +360,13 @@ export function DemoTitleRow({ beat, step, onShowInText, pinned, onTogglePin, fo
 export function StepNav({ step }: { step: NonNullable<Props["step"]> }) {
   return (
     <div className="step-nav" aria-label={`Step ${step.index + 1} of ${step.total}`}>
-      <button className="btn icon ghost" onClick={step.onPrev} disabled={!step.onPrev} aria-label="Previous step" title="Previous step">
+      <button className="btn icon ghost" onClick={step.onPrev} disabled={!step.onPrev} aria-label="Previous step" title="previous step (k)">
         <ChevronLeft />
       </button>
       <span className="step-count">
         {step.index + 1} / {step.total}
       </span>
-      <button className="btn icon ghost" onClick={step.onNext} disabled={!step.onNext} aria-label="Next step" title="Next step">
+      <button className="btn icon ghost" onClick={step.onNext} disabled={!step.onNext} aria-label="Next step" title="next step (j)">
         <ChevronRight />
       </button>
     </div>

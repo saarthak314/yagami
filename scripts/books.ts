@@ -118,7 +118,11 @@ function firstPageTitle(pdf: string): string | undefined {
     .filter((l) => l.text.length > 2 && !/arxiv|preprint|copyright|©|doi|http/i.test(l.text));
   if (!lines.length) return undefined;
   const maxH = Math.max(...lines.map((l) => l.h));
-  return lines
+  // A title is set clearly larger than the body text; a page without one (an excerpt, a
+  // chapter scan) would otherwise yield body lines, so let the caller fall back to the file name.
+  const body = [...lines.map((l) => l.h)].sort((a, b) => a - b)[Math.floor(lines.length / 2)];
+  if (maxH < 1.2 * body) return undefined;
+  const title = lines
     .filter((l) => l.h > 0.9 * maxH)
     .sort((a, b) => a.top - b.top)
     .slice(0, 3)
@@ -126,6 +130,7 @@ function firstPageTitle(pdf: string): string | undefined {
     .join(" ")
     .replace(/\s+/g, " ")
     .trim();
+  return title.length <= 120 && !/[.;]\s+\S/.test(title) ? title : undefined;
 }
 
 export function detectSource(pdf: string): SourceInfo {

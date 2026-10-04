@@ -39,7 +39,10 @@ When it finishes, any demo that failed comes with the `yagami fix` command to re
 
 ## The reader
 
-- **Library**: every book you've built, with a continue-reading shortcut.
+- **Library**: every book you've built, with a continue-reading shortcut. Drop a PDF on it (or choose a file) to build
+  a new book from the browser: it shows what it found, lets you pick chapters for long books, says what it will
+  cost, then builds with live progress. Pages are readable as soon as they're ready, the build keeps going if you
+  close the tab, and a stopped build can be resumed.
 - **Reading**: pages on the left, demo on the right (drag the divider to resize). The paragraph a demo explains is
   highlighted; markers in the margin jump to each step.
 - **Getting around**: contents (`t`), search across books, sections and demos (`⌘k`), zoom (`+`/`−`).

@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import type { Library } from "../types";
-import { assetUrl, isNumbered, loadUnit, planFor } from "../lib/data";
+import { ApiError, continueBook, forgetJob, isTouch, type Health, type JobSummary } from "../lib/api";
+import { assetUrl, isNumbered, loadUnit, planFor, useDemosVersion } from "../lib/data";
 import { LAST_BOOK, RESUME, load, progressKey, type Progress } from "../lib/store";
-import { hashFor } from "../lib/route";
+import { buildHash, hashFor } from "../lib/route";
+import { Uploader } from "./Uploader";
 import { Inline } from "../lib/inline";
 import { Check, Copy } from "../ui/icons";
 import { Mark } from "../ui/Brand";
@@ -30,7 +32,93 @@ function useCover(book: string, unit: string | undefined) {
 
 function Cover({ book, unit }: { book: string; unit?: string }) {
   const src = useCover(book, unit);
-  return <div className="cover">{src && <img src={src} alt="" loading="lazy" decoding="async" />}</div>;
+  const [loaded, setLoaded] = useState(false);
+  return (
+    <div className={`cover${loaded ? "" : " skel"}`}>
+      {src && <img src={src} alt="" loading="lazy" decoding="async" onLoad={() => setLoaded(true)} />}
+    </div>
+  );
+}
+
+const progressWidth = (job: JobSummary) => `${job.total ? Math.max(4, Math.round((job.ready / job.total) * 100)) : job.pagesReady ? 8 : 3}%`;
+const buildingWhat = (job: JobSummary) => (!job.pagesReady ? "reading pages" : job.total === 0 ? "planning demos" : `${job.ready}/${job.total} ready`);
+
+/** "building · 3/6 ready" with a thin bar under a book that's being added to; links to the progress view. */
+function BuildingMeta({ job }: { job: JobSummary }) {
+  return (
+    <a className="book-building" href={buildHash(job.job)}>
+      <span className="building-text">
+        <span className="building-dot" aria-hidden />
+        building · {buildingWhat(job)}
+      </span>
+      <span className="progress small" aria-hidden>
+        <span style={{ width: progressWidth(job) }} />
+      </span>
+    </a>
+  );
+}
+
+/** A book that exists only as a build so far: running, stopped or failed. */
+function PendingRow({ job }: { job: JobSummary }) {
+  const running = job.status === "running";
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+    } catch (e) {
+      setError(e instanceof ApiError ? (/no book/.test(e.message) ? "nothing was built yet — add the same pdf again" : e.message) : "something went wrong");
+      setBusy(false);
+    }
+  };
+  return (
+    <li className={`book-row pending ${job.status}`}>
+      <a className="book-link" href={buildHash(job.job)}>
+        <div className="cover placeholder" />
+        <div className="book-text">
+          <span className="book-title">{job.title || "new book"}</span>
+          {running ? (
+            <>
+              <span className="book-meta building-meta">
+                <span className="building-dot" aria-hidden />
+                building · {buildingWhat(job)}
+              </span>
+              <span className="progress small" aria-hidden>
+                <span style={{ width: progressWidth(job) }} />
+              </span>
+            </>
+          ) : (
+            <span className="book-meta">
+              <span className={`tag ${job.status}`}>{job.status}</span>
+              <span>{job.status === "failed" ? "open it to see why" : job.total ? `${job.ready} of ${job.total} demos made` : "stopped before any demo was made"}</span>
+            </span>
+          )}
+        </div>
+      </a>
+      {!running && (
+        <div className="row-actions">
+          <button className="btn small" disabled={busy} onClick={() => act(async () => (location.hash = buildHash((await continueBook(job.slug)).job)))}>
+            {job.status === "stopped" ? "resume" : "retry"}
+          </button>
+          <button
+            className="btn ghost small"
+            disabled={busy}
+            onClick={() =>
+              act(async () => {
+                await forgetJob(job.job);
+                window.dispatchEvent(new Event("yagami:jobs"));
+              })
+            }
+          >
+            remove
+          </button>
+          {error && <span className="row-error">{error}</span>}
+        </div>
+      )}
+    </li>
+  );
 }
 
 function Continue({ library }: { library: Library }) {
@@ -46,7 +134,7 @@ function Continue({ library }: { library: Library }) {
   const pageOf = p.pages && p.pageIndex !== undefined ? `p. ${p.page} of ${p.page === String(p.pageIndex + 1) ? p.pages : `${p.pages} pages`}` : "";
   return (
     <a className="continue" href={hashFor({ book: book.slug, unit: unit.id, section: p.section })} onClick={() => sessionStorage.setItem(RESUME, book.slug)}>
-      <span className="continue-label">Continue reading</span>
+      <span className="continue-label">continue reading</span>
       <span className="continue-title">{book.title}</span>
       <span className="continue-where">
         {where}
@@ -66,14 +154,14 @@ function SiteFooter() {
     <footer className="site-footer">
       <span>© {new Date().getFullYear()} Sarthak Tomar</span>
       <a href={REPO} target="_blank" rel="noreferrer">
-        Source
+        source
       </a>
-      <span className="site-footer-note">Books and papers belong to their authors and publishers.</span>
+      <span className="site-footer-note">books and papers belong to their authors and publishers.</span>
     </footer>
   );
 }
 
-function AddHint({ label = "Add a book" }: { label?: string }) {
+function AddHint({ label = "add a book" }: { label?: string }) {
   const cmd = "yagami <file.pdf>";
   const [copied, setCopied] = useState(false);
   return (
@@ -82,8 +170,8 @@ function AddHint({ label = "Add a book" }: { label?: string }) {
       <code>{cmd}</code>
       <button
         className="btn icon ghost"
-        aria-label="Copy command"
-        title="Copy"
+        aria-label="copy command"
+        title="copy"
         onClick={() => {
           navigator.clipboard?.writeText(cmd).then(
             () => {
@@ -100,12 +188,27 @@ function AddHint({ label = "Add a book" }: { label?: string }) {
   );
 }
 
-export function LibraryView({ library, notFound }: { library: Library; notFound?: string }) {
+export function LibraryView({ library, notFound, health, jobs = [] }: { library: Library; notFound?: string; health?: Health | null; jobs?: JobSummary[] }) {
   useEffect(() => {
     document.title = "yagami";
   }, []);
+  useDemosVersion();
   const books = library.books;
   const demos = books.reduce((n, b) => n + b.units.reduce((m, u) => m + demoCount(b.slug, u.id), 0), 0);
+  // The build server is there (local `yagami`): books can be added from the page.
+  const canUpload = !!health;
+  const touch = isTouch();
+  const running = new Map(jobs.filter((j) => j.kind === "build" && j.status === "running").map((j) => [j.slug, j]));
+  const inLibrary = new Set(books.map((b) => b.slug));
+  // Builds whose book isn't readable yet; the newest per book.
+  const pending = jobs.filter((j, i) => j.kind === "build" && !inLibrary.has(j.slug) && jobs.findIndex((x) => x.slug === j.slug) === i && (j.status === "running" || j.status === "stopped" || j.status === "failed"));
+  const pendingList = pending.length > 0 && (
+    <ul className="books">
+      {pending.map((j) => (
+        <PendingRow key={j.job} job={j} />
+      ))}
+    </ul>
+  );
 
   if (books.length === 0) {
     return (
@@ -115,8 +218,21 @@ export function LibraryView({ library, notFound }: { library: Library; notFound?
             <Mark size={24} />
             <span className="wordmark">yagami</span>
           </div>
-          <p>Your library is empty. Turn a paper or textbook into a book with</p>
-          <AddHint label="" />
+          {canUpload ? (
+            <>
+              <p>your library is empty.</p>
+              <div className="empty-add">
+                <Uploader health={health} prominent />
+                {pendingList}
+              </div>
+              {!touch && <AddHint label="or from a terminal" />}
+            </>
+          ) : (
+            <>
+              <p>your library is empty. turn a paper or a textbook into a book with</p>
+              <AddHint label="" />
+            </>
+          )}
         </div>
         <SiteFooter />
       </main>
@@ -126,17 +242,22 @@ export function LibraryView({ library, notFound }: { library: Library; notFound?
   return (
     <main className="library">
       <div className="library-inner">
-        {notFound && <p className="not-found">Nothing at {decodeURIComponent(notFound)}. Here is the library.</p>}
+        {notFound && <p className="not-found">nothing at {decodeURIComponent(notFound)}. here is the library.</p>}
         <Continue library={library} />
 
         <div className="library-head">
-          <h1>Library</h1>
+          <h1>library</h1>
           <span className="muted">
             {plural(books.length, "book")} · {plural(demos, "demo")}
           </span>
         </div>
 
+        {canUpload && <Uploader health={health} />}
+
         <ul className="books">
+          {pending.map((j) => (
+            <PendingRow key={j.job} job={j} />
+          ))}
           {books.map((b) => {
             const multi = b.units.length > 1;
             const n = b.units.reduce((m, u) => m + demoCount(b.slug, u.id), 0);
@@ -148,11 +269,12 @@ export function LibraryView({ library, notFound }: { library: Library; notFound?
                     <span className="book-title">{b.title}</span>
                     {b.subtitle && !b.title.includes(b.subtitle) && <span className="book-sub">{b.subtitle}</span>}
                     <span className="book-meta">
-                      <span>{multi ? plural(b.units.length, "chapter") : "Paper"}</span>
+                      <span>{multi ? plural(b.units.length, "chapter") : "paper"}</span>
                       <span>{plural(n, "demo")}</span>
                     </span>
                   </div>
                 </a>
+                {running.has(b.slug) && <BuildingMeta job={running.get(b.slug)!} />}
                 {multi && (
                   <ul className="chapters">
                     {b.units.map((u) => (
@@ -173,7 +295,7 @@ export function LibraryView({ library, notFound }: { library: Library; notFound?
           })}
         </ul>
 
-        <AddHint />
+        {canUpload ? !touch && <AddHint label="or from a terminal" /> : <AddHint />}
         <SiteFooter />
       </div>
     </main>

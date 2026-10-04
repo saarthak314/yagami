@@ -50,7 +50,7 @@ export function ThemeMenu() {
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="Theme"
-        title="Theme"
+        title="theme"
         onClick={() => setOpen((v) => !v)}
       >
         <ThemeIcon />

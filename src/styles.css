@@ -11,6 +11,7 @@
   --muted: #a1a1a1;
   --faint: #6b6b6b;
   --accent: #52a8ff;
+  --accent2: #f5a623;
   --accent-soft: rgba(82, 168, 255, 0.08);
   --accent-flash: rgba(82, 168, 255, 0.24);
   --line: #2e2e2e;
@@ -101,7 +102,7 @@ a {
 .quiet {
   margin: 0;
   padding: 16px 20px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -306,7 +307,7 @@ a {
 
 .subbar-page {
   font-family: var(--mono);
-  color: var(--faint);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -327,7 +328,7 @@ a {
 
 .search-btn kbd {
   border-color: var(--border);
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* ---------------------------------------------------------------- controls */
@@ -665,7 +666,7 @@ kbd {
 }
 
 .palette-input::placeholder {
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .palette-list {
@@ -693,9 +694,9 @@ kbd {
 
 .palette-kind {
   font-size: 11px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--faint);
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  color: var(--muted);
 }
 
 .palette-main {
@@ -719,12 +720,12 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .palette-list li.palette-empty {
   display: block;
-  color: var(--faint);
+  color: var(--muted);
   cursor: default;
 }
 
@@ -757,9 +758,8 @@ kbd {
 }
 
 .continue-label {
-  font-size: 11px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0.02em;
   color: var(--muted);
   margin-bottom: 4px;
 }
@@ -778,14 +778,14 @@ kbd {
 }
 
 .continue-page {
-  color: var(--faint);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
 .not-found {
   margin: 0 0 24px;
   font-size: 13px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .progress {
@@ -920,7 +920,7 @@ kbd {
 .chapter-num,
 .chapter-demos {
   font-size: 13px;
-  color: var(--faint);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
@@ -939,7 +939,7 @@ kbd {
   padding-top: 20px;
   border-top: 1px solid var(--border);
   font-size: 13px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .site-footer {
@@ -949,7 +949,7 @@ kbd {
   gap: 4px 16px;
   margin-top: 32px;
   font-size: 12px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .site-footer a {
@@ -1125,7 +1125,7 @@ kbd {
 .toc-num {
   font-family: var(--mono);
   font-size: 12px;
-  color: var(--faint);
+  color: var(--muted);
   min-width: 24px;
 }
 
@@ -1371,10 +1371,10 @@ body.resizing .resize-handle {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
   color: var(--muted);
 }
 
@@ -1466,9 +1466,9 @@ body.resizing .resize-handle {
   overflow-wrap: break-word;
 }
 
-/* Generated labels mix "show x" and "Show x"; normalise to sentence case. */
+/* Generated labels mix "show x" and "Show x"; normalise to lowercase (symbols like N keep their case). */
 .control-label::first-letter {
-  text-transform: uppercase;
+  text-transform: lowercase;
 }
 
 .control-value {
@@ -1516,7 +1516,7 @@ body.resizing .resize-handle {
 .demo-quiet {
   margin: 0;
   padding: 16px 20px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -1730,4 +1730,1151 @@ body.resizing .resize-handle {
 
 .cover img {
   filter: var(--page-filter);
+}
+
+/* ------------------------------------------------------------------ loading */
+
+.skel {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--surface);
+}
+
+.skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--bg-hover) 50%, transparent);
+  transform: translateX(-100%);
+  animation: skel-sweep 1.6s ease-in-out infinite;
+}
+
+/* A page keeps its absolute box while its image loads (the skeleton only adds the sweep). */
+.page-clip.skel {
+  position: absolute;
+}
+
+@keyframes skel-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.spinner {
+  flex-shrink: 0;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.shimmer-text {
+  background: linear-gradient(90deg, var(--muted) 35%, var(--fg) 50%, var(--muted) 65%);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-text 2.4s linear infinite;
+}
+
+@keyframes shimmer-text {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skel::after,
+  .spinner,
+  .shimmer-text,
+  .bar > span.indeterminate {
+    animation: none;
+  }
+  .shimmer-text {
+    color: var(--muted);
+    background: none;
+  }
+}
+
+.skel-library {
+  display: grid;
+  gap: 20px;
+}
+
+.skel-heading {
+  display: block;
+  width: 120px;
+  height: 22px;
+  border-radius: 4px;
+}
+
+.skel-book {
+  display: flex;
+  gap: 16px;
+}
+
+.skel-cover {
+  display: block;
+  width: 56px;
+  height: 72px;
+  border-radius: 4px;
+}
+
+.skel-lines {
+  flex: 1;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.skel-line {
+  display: block;
+  height: 12px;
+  border-radius: 3px;
+  width: 50%;
+}
+
+.skel-line.short {
+  width: 24%;
+}
+
+/* Same box as the 20px/1.5 title it stands in for. */
+.skel-title {
+  display: block;
+  width: 55%;
+  height: 30px;
+  border-radius: 4px;
+}
+
+.skel-row {
+  display: block;
+  height: 12px;
+  border-radius: 3px;
+}
+
+.skel-block {
+  display: grid;
+  gap: 14px;
+  padding: 8px 0;
+}
+
+.stage-skel {
+  position: absolute;
+  inset: 12px 20px;
+  border-radius: 8px;
+}
+
+.stage-pending {
+  position: absolute;
+  inset: 0;
+}
+
+.stage-pending .demo-quiet {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: 24px;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------------ add a book */
+
+.btn.primary {
+  background: var(--fg);
+  border-color: var(--fg);
+  color: var(--bg);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: var(--fg);
+  opacity: 0.88;
+}
+
+.btn.primary:disabled {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--faint);
+}
+
+a.btn {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.btn.small {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.uploader {
+  margin: 16px 0 8px;
+}
+
+.dropzone {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 14px;
+  align-items: center;
+  padding: 16px 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 120ms, background-color 120ms, color 120ms;
+}
+
+.dropzone:hover {
+  border-color: var(--faint);
+  color: var(--fg);
+}
+
+.dropzone.dragging {
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.dz-icon {
+  grid-row: span 2;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.dropzone.dragging .dz-icon {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.dz-text {
+  font-size: 14px;
+  color: var(--fg);
+}
+
+.dz-link {
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 3px;
+}
+
+.dropzone:hover .dz-link {
+  text-decoration-color: currentColor;
+}
+
+.dz-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dropzone.prominent {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  row-gap: 6px;
+  padding: 32px 24px;
+  min-width: min(440px, 86vw);
+  text-align: center;
+}
+
+.dropzone.prominent .dz-icon {
+  grid-row: auto;
+  margin-bottom: 6px;
+}
+
+/* While a file is dragged over the window: a quiet frame around everything. */
+.drop-overlay {
+  position: fixed;
+  inset: 6px;
+  z-index: 60;
+  border: 1.5px solid var(--accent);
+  border-radius: 10px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+
+.upload-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.upload-file {
+  color: var(--muted);
+  margin-right: 8px;
+}
+
+.upload-file::after {
+  content: " ·";
+}
+
+.upload-card {
+  padding: 16px 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  text-align: left;
+}
+
+.empty .upload-card {
+  width: min(520px, 86vw);
+}
+
+.upload-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.upload-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+.upload-size {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.bar {
+  display: block;
+  height: 2px;
+  margin: 12px 0 10px;
+  background: var(--border-strong);
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms ease-out;
+}
+
+.bar > span.indeterminate {
+  width: 30% !important;
+  animation: indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+.bar.small {
+  display: inline-block;
+  width: 72px;
+  margin: 0 0 0 4px;
+  vertical-align: middle;
+}
+
+.upload-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.upload-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.upload-titles {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.upload-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.upload-author {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.upload-meta {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.upload-note {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.upload-blocked {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  border-left: 2px solid var(--accent2);
+  background: var(--bg);
+  border-radius: 0 4px 4px 0;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.upload-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.upload-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.picker {
+  margin: 16px 0 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.picker-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.picker-count {
+  flex: 1;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.picker-list {
+  list-style: none;
+  margin: 0 -8px;
+  padding: 0;
+}
+
+.picker-list label {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) 40px 76px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.picker-list label:hover {
+  background: var(--bg-hover);
+}
+
+.picker-list label.on {
+  color: var(--fg);
+}
+
+.picker-list label.locked {
+  cursor: default;
+  color: var(--muted);
+}
+
+.picker-list label.locked:hover {
+  background: none;
+}
+
+.check:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.picker-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-built {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.picker-pages {
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* building books in the library */
+
+.book-building {
+  display: grid;
+  gap: 6px;
+  margin: -8px 0 12px 64px;
+  padding: 0 8px 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.book-building:hover .building-text {
+  color: var(--fg);
+}
+
+.building-text,
+.building-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.building-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.progress.small {
+  height: 2px;
+  margin-top: 0;
+  max-width: 240px;
+}
+
+.book-row.pending .progress.small {
+  margin-top: 10px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .building-dot {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------ build view */
+
+.back {
+  display: inline-block;
+  margin-bottom: 24px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.back:hover {
+  color: var(--fg);
+}
+
+.build-head {
+  display: grid;
+  gap: 4px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.build-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.build-status.live {
+  color: var(--accent);
+}
+
+.build-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.build-meta {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.build-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.build-body {
+  padding: 8px 0;
+}
+
+.build-unit + .build-unit {
+  border-top: 1px solid var(--border);
+}
+
+.build-unit-title {
+  margin: 16px 0 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.build-steps,
+.build-demos {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.build-steps {
+  padding: 8px 0;
+}
+
+.build-step,
+.build-demo {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+  min-height: 32px;
+  font-size: 13px;
+}
+
+.build-step {
+  grid-template-columns: 20px auto 1fr;
+  color: var(--muted);
+}
+
+.build-step.done {
+  color: var(--muted);
+}
+
+.build-step.running {
+  color: var(--fg);
+}
+
+.build-step.pending {
+  color: var(--muted);
+}
+
+.glyph {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--faint);
+}
+
+.build-step.done .glyph,
+.build-demo.phase-pass .glyph {
+  color: var(--muted);
+}
+
+.build-step.running .glyph,
+.build-demo.active .glyph {
+  color: var(--accent);
+}
+
+.build-step.error,
+.build-step.error .glyph,
+.build-demo.phase-fail .glyph {
+  color: var(--accent2);
+}
+
+.dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.build-demos {
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+}
+
+.build-demo {
+  border-bottom: 1px solid var(--border);
+  padding: 4px 0;
+}
+
+.build-demo-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+.build-demo.phase-queued .build-demo-title {
+  color: var(--muted);
+}
+
+.build-demo-state {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.build-demo.active .build-demo-state {
+  color: var(--accent);
+}
+
+.build-demo.phase-pass .build-demo-state {
+  color: var(--muted);
+}
+
+.build-demo.phase-fail .build-demo-state {
+  color: var(--accent2);
+}
+
+.attempt {
+  color: var(--muted);
+}
+
+.build-reason {
+  grid-column: 2 / -1;
+  padding-bottom: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.build-demo > .btn.small {
+  grid-column: 2;
+  justify-self: start;
+  margin: 2px 0 6px;
+}
+
+.skel-item {
+  grid-template-columns: 20px minmax(0, 1fr);
+  min-height: 32px;
+}
+
+.fix-form {
+  grid-column: 2 / -1;
+  display: grid;
+  gap: 6px;
+  padding: 4px 0 10px;
+}
+
+.fix-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.fix-input {
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.fix-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.fix-form .upload-actions {
+  margin-top: 4px;
+}
+
+.build-foot {
+  padding-top: 16px;
+}
+
+.build-stats {
+  display: flex;
+  gap: 16px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.build-done {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+  color: var(--fg);
+}
+
+.build-done.ok .glyph {
+  color: var(--accent);
+}
+
+.build-done.bad .glyph {
+  color: var(--accent2);
+}
+
+@media (max-width: 600px) {
+  .dropzone:not(.prominent) {
+    grid-template-columns: 1fr;
+    justify-items: start;
+    row-gap: 6px;
+  }
+  .dropzone:not(.prominent) .dz-icon {
+    grid-row: auto;
+  }
+  .book-building {
+    margin-left: 0;
+  }
+  .picker-list label {
+    grid-template-columns: 14px minmax(0, 1fr) 34px 68px;
+    gap: 8px;
+    min-height: 44px;
+  }
+  .build-actions .btn {
+    height: 36px;
+  }
+}
+
+/* ------------------------------------------------------------------ audit fixes */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* A skeleton without the sweep (where something else is already animating). */
+.skel.static::after {
+  display: none;
+}
+
+.upload-box {
+  transition: height 180ms ease-out;
+  overflow: hidden;
+  margin: -4px;
+  padding: 4px;
+  box-sizing: content-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .upload-box {
+    transition: none;
+  }
+}
+
+.upload-skel {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.skel-btn {
+  display: block;
+  width: 72px;
+  height: 28px;
+  margin-top: 8px;
+  border-radius: 6px;
+}
+
+.upload-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.upload-title:focus {
+  outline: none;
+}
+
+.upload-title:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.upload-card.dragging {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.prereqs {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.prereqs li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.prereqs code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.cover.placeholder {
+  background: var(--surface);
+  background-image: linear-gradient(var(--border-strong), var(--border-strong)), linear-gradient(var(--border-strong), var(--border-strong)), linear-gradient(var(--border), var(--border));
+  background-size: 60% 3px, 40% 3px, 70% 2px;
+  background-position: 8px 10px, 8px 18px, 8px 30px;
+  background-repeat: no-repeat;
+}
+
+.book-row.pending {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.row-error {
+  flex-basis: 100%;
+  text-align: right;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tag.failed {
+  border-color: var(--accent2);
+  color: var(--fg);
+}
+
+.empty-add {
+  width: min(712px, 100%);
+  text-align: left;
+}
+
+.empty-add .uploader {
+  margin: 0;
+}
+
+.empty-add .books {
+  margin-top: 16px;
+}
+
+.book-title,
+.build-title,
+.upload-title,
+.continue-title {
+  text-wrap: balance;
+}
+
+/* build page: one sticky status line, cover beside the title */
+
+.build-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.build-bar-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg);
+}
+
+.build-bar.running .build-bar-state {
+  color: var(--accent);
+}
+
+.build-bar.ok .build-bar-state svg {
+  color: var(--accent);
+}
+
+.build-bar.failed .build-bar-state svg,
+.build-bar.partial .build-bar-state svg {
+  color: var(--accent2);
+}
+
+.build-head {
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 20px;
+  align-items: start;
+}
+
+.build-head-text {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.build-cover {
+  width: 72px;
+  height: 94px;
+}
+
+.build-title:focus {
+  outline: none;
+}
+
+.build-title:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.build-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dash {
+  display: inline-block;
+  width: 9px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: currentColor;
+}
+
+.build-done.stopped .glyph,
+.build-done.partial .glyph,
+.build-done.failed .glyph {
+  color: var(--muted);
+}
+
+.build-done.partial .glyph,
+.build-done.failed .glyph {
+  color: var(--accent2);
+}
+
+.build-demo.halted .build-demo-state {
+  color: var(--muted);
+}
+
+.build-summary {
+  padding-top: 16px;
+}
+
+/* touch: no keyboard hints, roomier targets */
+@media (pointer: coarse) {
+  .search-btn kbd {
+    display: none;
+  }
+  .upload-actions .btn,
+  .build-actions .btn,
+  .row-actions .btn,
+  .fix-form .btn {
+    height: 44px;
+    padding: 0 14px;
+  }
+  .btn.icon.ghost {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 600px) {
+  .build-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .build-cover {
+    display: none;
+  }
+  .book-row.pending {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .row-actions {
+    justify-content: flex-start;
+    padding: 0 0 12px 64px;
+  }
+}
+
+/* Headings that receive focus programmatically (to announce a new state) are not controls: no focus ring. */
+h1[tabindex="-1"]:focus,
+h2[tabindex="-1"]:focus,
+h3[tabindex="-1"]:focus {
+  outline: none;
 }

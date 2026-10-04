@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import { useSyncExternalStore, type ComponentType } from "react";
 import type { Anchor, Beat, DemoPlan, DemoProps, DemoSpec, Library, Unit } from "../types";
 
 const base = import.meta.env.BASE_URL;
@@ -44,9 +44,19 @@ type Loader = () => Promise<{ default: ComponentType<DemoProps> }>;
 const planModules = import.meta.glob<DemoPlan>("../demos/*/*/plan.json", { eager: true, import: "default" });
 const componentModules = import.meta.glob<{ default: ComponentType<DemoProps> }>("../demos/*/*/*.tsx");
 
-const plans = new Map<string, DemoPlan>();
-const loaders = new Map<string, Loader>();
-
+// The registry lives on globalThis so that, while a build is writing new plans and
+// demos, this module can be hot-replaced in place (see the accept() below): readers
+// see the new demos without a page reload.
+interface Registry {
+  plans: Map<string, DemoPlan>;
+  loaders: Map<string, Loader>;
+  version: number;
+}
+const reg: Registry = ((globalThis as { __yagamiDemos?: Registry }).__yagamiDemos ??= { plans: new Map(), loaders: new Map(), version: 0 });
+const plans = reg.plans;
+const loaders = reg.loaders;
+plans.clear();
+loaders.clear();
 for (const [path, plan] of Object.entries(planModules)) {
   const m = /demos\/([^/]+)\/([^/]+)\/plan\.json$/.exec(path);
   if (m) plans.set(`${m[1]}/${m[2]}`, plan);
@@ -54,6 +64,18 @@ for (const [path, plan] of Object.entries(planModules)) {
 for (const [path, load] of Object.entries(componentModules)) {
   const m = /demos\/([^/]+)\/([^/]+)\/(\w+)\.tsx$/.exec(path);
   if (m) loaders.set(`${m[1]}/${m[2]}/${m[3]}`, load);
+}
+reg.version++;
+if (typeof window !== "undefined") window.dispatchEvent(new Event("yagami:demos"));
+if (import.meta.hot) import.meta.hot.accept();
+
+const subscribe = (cb: () => void) => {
+  window.addEventListener("yagami:demos", cb);
+  return () => window.removeEventListener("yagami:demos", cb);
+};
+/** Changes whenever plans or demo files are added or updated (re-render on it). */
+export function useDemosVersion(): number {
+  return useSyncExternalStore(subscribe, () => reg.version);
 }
 
 /** `unitKey` is "<book>/<unit>". */

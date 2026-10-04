@@ -44,7 +44,7 @@ export function searchIndex(lib: Library): SearchItem[] {
       }
     }
   }
-  for (const t of THEMES) items.push({ kind: "Theme", title: `Theme: ${t.label}`, context: "", target: { book: "" }, hay: `theme ${t.label} ${t.dark ? "dark" : "light"}`.toLowerCase(), theme: t.id });
+  for (const t of THEMES) items.push({ kind: "Theme", title: `theme: ${t.label}`, context: "", target: { book: "" }, hay: `theme ${t.label} ${t.dark ? "dark" : "light"}`.toLowerCase(), theme: t.id });
   return items;
 }
 

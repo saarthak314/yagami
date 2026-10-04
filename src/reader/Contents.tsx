@@ -50,7 +50,7 @@ export function Contents({ title, unitKey, unit, sections, current, activeDemo, 
         <span className="contents-title">
           <Inline md={title} />
         </span>
-        <button className="btn icon ghost" onClick={onClose} aria-label="Close contents" title="Close (Esc)">
+        <button className="btn icon ghost" onClick={onClose} aria-label="Close contents" title="close (esc)">
           <Close />
         </button>
       </div>

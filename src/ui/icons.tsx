@@ -104,3 +104,22 @@ export const Close = () => (
     <path d="M4 4l8 8M12 4l-8 8" />
   </Icon>
 );
+export const UploadIcon = () => (
+  <Icon size={20}>
+    <path d="M8 10.5V2.75M5 5.5l3-3 3 3" />
+    <path d="M2.75 10v2a1.5 1.5 0 001.5 1.5h7.5a1.5 1.5 0 001.5-1.5v-2" />
+  </Icon>
+);
+export const Cross = () => (
+  <Icon>
+    <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />
+  </Icon>
+);
+
+/** The one progress animation: a small arc that turns (static under reduced motion). */
+export const Spinner = ({ label }: { label?: string }) => (
+  <svg className="spinner" width="14" height="14" viewBox="0 0 16 16" fill="none" role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true}>
+    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeOpacity="0.2" strokeWidth="1.75" />
+    <path d="M8 2a6 6 0 016 6" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+  </svg>
+);

@@ -285,8 +285,9 @@ export function Reader({ unit, markers, active, zoom, fit, flashKey, bottomInset
               const Wd = (w: number) => `${(w / g.vis) * 100}%`;
               return (
                 <div key={p.label} className="page" style={{ top: g.top, left: pad + (colW - g.w) / 2, width: g.w, height: g.h }}>
-                  <div className="page-clip">
+                  <div className="page-clip skel">
                     <img
+                      onLoad={(e) => e.currentTarget.parentElement?.classList.remove("skel")}
                       src={assetUrl(p.src)}
                       srcSet={p.srcset?.map((v) => `${assetUrl(v.src)} ${v.w}w`).join(", ")}
                       sizes={`${Math.round(g.fw)}px`}

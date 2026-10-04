@@ -189,7 +189,7 @@ export const THEMES: Palette[] = [
     border: "#ccd0da",
     borderStrong: "#bcc0cc",
     fg: "#4c4f69",
-    muted: "#6c6f85",
+    muted: "#5c5f77",
     faint: "#9ca0b0",
     grid: "#dce0e8",
     accent: "#1e66f5",
