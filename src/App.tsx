@@ -28,7 +28,17 @@ export function App() {
   const [library, setLibrary] = useState<Library | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [route, setRoute] = useState<Route & { anchor?: string; seq: number }>(() => ({ ...parseHash(), seq: 0 }));
-  const [palette, setPalette] = useState(false);
+  const [palette, setPaletteState] = useState(false);
+  // Focus goes back to whatever opened the palette when it closes.
+  const opener = useRef<HTMLElement | null>(null);
+  const setPalette = useCallback((v: boolean | ((p: boolean) => boolean)) => {
+    setPaletteState((prev) => {
+      const next = typeof v === "function" ? v(prev) : v;
+      if (next && !prev) opener.current = document.activeElement as HTMLElement | null;
+      if (!next && prev) requestAnimationFrame(() => opener.current?.focus?.({ preventScroll: true }));
+      return next;
+    });
+  }, []);
   const [help, setHelp] = useState(false);
   // Anchor for the next hashchange (demos have no URL of their own).
   const nextAnchor = useRef<string | undefined>(undefined);
@@ -57,7 +67,7 @@ export function App() {
       nextAnchor.current = t.anchor;
       location.hash = h;
     }
-  }, []);
+  }, [setPalette]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -77,7 +87,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [setPalette]);
 
   if (!library) {
     return (
@@ -120,7 +130,7 @@ export function App() {
             </button>
             <HelpButton open={help} onOpenChange={setHelp} />
           </header>
-          <LibraryView library={library} />
+          <LibraryView library={library} notFound={route.book ? location.hash : undefined} />
         </div>
       )}
       {palette && <Palette library={library} near={at ?? undefined} onGo={navigate} onClose={() => setPalette(false)} />}

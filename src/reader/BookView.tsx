@@ -1,23 +1,22 @@
-// `#/<book>/<unit>/<section>`: one unit open. Header, optional contents on the
-// left, the pages, and the demo pane on the right (a bottom sheet on phones).
+// `#/<book>/<unit>/<section>`: one unit open. Header, the contents drawer, the
+// pages, and the demo pane on the right (a bottom sheet on phones).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Library, Unit } from "../types";
 import { beatsInOrder, isNumbered, loadUnit, planFor } from "../lib/data";
 import { hashFor } from "../lib/route";
 import type { Target } from "../lib/search";
-import { LAST_BOOK, progressKey, save, useStored } from "../lib/store";
+import { LAST_BOOK, RESUME, load, progressKey, save, useStored, type Progress } from "../lib/store";
 import { Inline } from "../lib/inline";
-import { Reader, type Marker, type ReaderHandle, type ReaderPosition } from "./Reader";
+import { Reader, textCrop, type Fit, type Marker, type ReaderHandle, type ReaderPosition } from "./Reader";
 import { Contents } from "./Contents";
 import { DemoPane, StepNav } from "../demo/DemoPane";
 import { Brand } from "../ui/Brand";
 import { HelpButton } from "../ui/Help";
-import { ChevronDown, ChevronUp, ListIcon, Locate, Minus, PanelRight, Plus, Search } from "../ui/icons";
+import { ChevronDown, ChevronUp, ListIcon, Locate, Minus, PanelRight, Plus, Search, ZoomIcon } from "../ui/icons";
 
 const ZOOMS = [0.75, 1, 1.25, 1.5, 1.75, 2];
-/** Phones cycle through fewer, larger steps from one button. */
-const PHONE_ZOOMS = [1, 1.5, 2];
+const MIN_PANE = 420;
 
 function useNarrow() {
   const q = "(max-width: 899px)";
@@ -31,12 +30,75 @@ function useNarrow() {
   return narrow;
 }
 
-const typing = (t: EventTarget | null) => {
+/** Keys typed into a field belong to the field; buttons, sliders and checkboxes don't take letters. */
+export const typing = (t: EventTarget | null) => {
   const el = t as HTMLElement | null;
-  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable);
+  if (!el) return false;
+  if (el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable) return true;
+  return el.tagName === "INPUT" && !["range", "checkbox", "radio", "button"].includes((el as HTMLInputElement).type);
 };
 
 const sectionLabel = (s: { id: string; title: string }) => (isNumbered(s.id) ? `${s.id} ${s.title}` : s.title);
+
+/** Fit page / fit text / fixed zoom, as one menu. */
+function ZoomMenu({ fit, zoom, onPick, compact }: { fit: Fit; zoom: number; onPick: (fit: Fit, zoom: number) => void; compact: boolean }) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const off = (e: PointerEvent) => !wrap.current?.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("pointerdown", off);
+    window.addEventListener("keydown", esc);
+    return () => {
+      window.removeEventListener("pointerdown", off);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+  const label = zoom === 1 ? (fit === "text" ? "Fit text" : "Fit page") : `${Math.round(zoom * 100)}%`;
+  const items: [string, Fit, number][] = [
+    ["Fit page", "page", 1],
+    ["Fit text", "text", 1],
+    ["125%", fit, 1.25],
+    ["150%", fit, 1.5],
+    ["175%", fit, 1.75],
+    ["200%", fit, 2],
+  ];
+  return (
+    <div className="menu-wrap" ref={wrap}>
+      {compact ? (
+        <button className="btn icon ghost" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)} aria-label={`Zoom: ${label}`} title={`Zoom: ${label}`}>
+          <ZoomIcon />
+        </button>
+      ) : (
+        <button className="zoom-level" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)} title="Page size">
+          {label}
+        </button>
+      )}
+      {open && (
+        <div className="menu" role="menu">
+          {items.map(([l, f, z]) => {
+            const on = l.startsWith("Fit") ? zoom === 1 && f === fit : zoom === z;
+            return (
+              <button
+                key={l}
+                role="menuitemradio"
+                aria-checked={on}
+                className={on ? "on" : undefined}
+                onClick={() => {
+                  onPick(f, z);
+                  setOpen(false);
+                }}
+              >
+                {l}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface Props {
   library: Library;
@@ -70,21 +132,24 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
   }, [slug, unitId]);
 
   // Preferences.
-  const [tocOpenWide, setTocOpenWide] = useStored("yagami.contents", false);
-  const [tocOpenNarrow, setTocOpenNarrow] = useState(false);
-  const tocOpen = narrow ? tocOpenNarrow : tocOpenWide;
-  const setTocOpen = narrow ? setTocOpenNarrow : setTocOpenWide;
+  const [tocOpen, setTocOpen] = useStored(narrow ? "yagami.contents.phone" : "yagami.contents", false);
   const [demoHidden, setDemoHidden] = useStored("yagami.demoHidden", false);
   const [demoW, setDemoW] = useStored<number | null>("yagami.demoWidth", null);
-  const [zoom, setZoom] = useStored(`yagami.zoom.${slug}`, 1);
-  const [phoneZoom, setPhoneZoom] = useStored(`yagami.zoom.${slug}.phone`, 1);
+  const device = narrow ? "phone" : "wide";
+  const [zoom, setZoom] = useStored(`yagami.zoom.${slug}.${device}`, 1);
+  // Fit text by default where type would otherwise be small: phones, and scans with wide margins.
+  const cropWidth = useMemo(() => (unit ? textCrop(unit).width : 1), [unit]);
+  const [fitPref, setFit] = useStored<Fit | null>(`yagami.fit.${slug}.${device}`, null);
+  const fit: Fit = fitPref ?? (narrow || cropWidth < 0.75 ? "text" : "page");
   const [focus, setFocus] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
 
   // Demo state.
   const reader = useRef<ReaderHandle>(null);
-  const [pos, setPos] = useState<ReaderPosition>({ active: 0, page: "", pageIndex: 0, section: "", fraction: 0 });
+  const [pos, setPos] = useState<ReaderPosition>({ active: 0, page: "", pageIndex: 0, pageFrac: 0, section: "", fraction: 0 });
   const [pinned, setPinned] = useState<number | null>(null);
+  // While the pane is being resized the text reflows; keep the demo steady.
+  const [frozen, setFrozen] = useState<number | null>(null);
   const [playing, setPlaying] = useState(true);
   const [resetKey, setResetKey] = useState(0);
   const [flashKey, setFlashKey] = useState(0);
@@ -101,7 +166,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
     });
   }, [beats]);
   const hasDemos = beats.length > 0;
-  const shown = Math.min(pinned ?? pos.active, Math.max(0, beats.length - 1));
+  const shown = Math.min(frozen ?? pinned ?? pos.active, Math.max(0, beats.length - 1));
   const current = beats[shown] ?? null;
 
   // Steps of the current demo, in reading order.
@@ -118,11 +183,35 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
     [beats, pinned],
   );
 
-  // Arrive at the requested section / demo.
+  // Next / previous step: within the current demo, then on into the neighbouring demo in the text.
+  const neighbour = useCallback(
+    (dir: 1 | -1): number | null => {
+      if (!current) return null;
+      const within = steps[stepIdx + dir];
+      if (within !== undefined) return within;
+      for (let i = shown + dir; i >= 0 && i < beats.length; i += dir) if (beats[i].demo.id !== current.demo.id) return i;
+      return null;
+    },
+    [current, steps, stepIdx, shown, beats],
+  );
+  const step = (dir: 1 | -1) => {
+    const n = neighbour(dir);
+    if (n !== null) goToBeat(n);
+  };
+
+  // Arrive at the requested section / demo (or resume exactly where Continue left off).
   useEffect(() => {
     if (!unit) return;
+    const resume = sessionStorage.getItem(RESUME) === slug;
+    sessionStorage.removeItem(RESUME);
+    const saved = load<Progress | null>(progressKey(slug), null);
     if (target.anchor) reader.current?.scrollToAnchor(target.anchor, false);
-    else if (target.section) reader.current?.scrollToSection(target.section, false);
+    else if (resume && saved?.unit === unitId && saved.pageIndex !== undefined) reader.current?.scrollToPoint(saved.pageIndex, saved.pageFrac ?? 0);
+    else if (target.section) {
+      // Prefer the section's first demo paragraph, so the demo shown is about text on screen.
+      const first = beats.find((b) => b.anchor.section === target.section);
+      reader.current?.scrollToSection(target.section, false, first?.anchor.id);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unit, target.seq]);
 
@@ -132,8 +221,16 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
     if (!unit || !pos.section) return;
     history.replaceState(null, "", hashFor({ book: slug, unit: unitId, section: pos.section }));
     save(LAST_BOOK, slug);
-    save(progressKey(slug), { unit: unitId, section: pos.section, page: pos.page, fraction: pos.fraction });
-  }, [unit, slug, unitId, pos.section, pos.page, pos.fraction]);
+    save(progressKey(slug), {
+      unit: unitId,
+      section: pos.section,
+      page: pos.page,
+      pageIndex: pos.pageIndex,
+      pageFrac: pos.pageFrac,
+      pages: unit.pages.length,
+      fraction: pos.fraction,
+    } satisfies Progress);
+  }, [unit, slug, unitId, pos]);
   useEffect(() => {
     document.title = [section && section.title, book.short, "yagami"].filter(Boolean).join(" · ");
   }, [section, book.short]);
@@ -161,17 +258,19 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
       const k = e.key;
       if (k === "Escape") {
         if (focus) setFocus(false);
-        else if (narrow && tocOpen) setTocOpen(false);
+        else if (tocOpen) setTocOpen(false);
         else if (narrow && sheetOpen) setSheetOpen(false);
         return;
       }
+      const onControl = (e.target as HTMLElement).closest?.("button, input, select, a");
       if (k === "t") setTocOpen((v) => !v);
       else if (k === "+" || k === "=") zoomBy(1);
       else if (k === "-" || k === "_") zoomBy(-1);
-      else if (k === "0") setZoom(1);
-      else if (!hasDemos) return;
-      else if (k === "j") goToBeat(shown + 1);
-      else if (k === "k") goToBeat(shown - 1);
+      else if (k === "0") {
+        setZoom(1);
+      } else if (!hasDemos) return;
+      else if (k === "j") step(1);
+      else if (k === "k") step(-1);
       else if (k === "h") setPinned((p) => (p === null ? shown : null));
       else if (k === "r") setResetKey((x) => x + 1);
       else if (k === "f") {
@@ -180,31 +279,33 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
       } else if (k === "d") {
         setFocus(false);
         setDemoHidden((v) => !v);
-      } else if (k === " ") {
+      } else if (k === " " && !onControl) {
+        // Space on a focused button or checkbox presses it; elsewhere it plays / pauses.
         e.preventDefault();
         setPlaying((p) => !p);
       } else return;
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [modal, help, focus, narrow, tocOpen, sheetOpen, hasDemos, shown, goToBeat, zoomBy, setZoom, setTocOpen, setDemoHidden]);
+  });
 
-  // Drag to resize the demo pane.
-  const defaultW = () => Math.round(Math.min(760, Math.max(380, window.innerWidth * 0.42)));
-  const width = demoW ?? defaultW();
+  // Drag to resize the demo pane (between MIN_PANE and 55% of the window).
+  const maxPane = () => Math.max(MIN_PANE, Math.round(window.innerWidth * 0.55));
+  const defaultW = () => Math.round(Math.min(maxPane(), Math.max(MIN_PANE, window.innerWidth * 0.42)));
+  const width = Math.min(maxPane(), Math.max(MIN_PANE, demoW ?? defaultW()));
   const onResizeStart = (e: React.PointerEvent) => {
     e.preventDefault();
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
     document.body.classList.add("resizing");
-    const move = (ev: PointerEvent) => {
-      const max = Math.min(window.innerWidth * 0.7, window.innerWidth - 420);
-      setDemoW(Math.round(Math.min(max, Math.max(340, window.innerWidth - ev.clientX))));
-    };
+    setFrozen(shown);
+    const move = (ev: PointerEvent) => setDemoW(Math.round(Math.min(maxPane(), Math.max(MIN_PANE, window.innerWidth - ev.clientX))));
     const up = () => {
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
       document.body.classList.remove("resizing");
+      // Let the text settle at its new width before following it again.
+      requestAnimationFrame(() => requestAnimationFrame(() => setFrozen(null)));
     };
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
@@ -216,6 +317,8 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
     return pos.page === String(pos.pageIndex + 1) ? `p. ${pos.page} / ${n}` : `p. ${pos.page} · ${pos.pageIndex + 1}/${n}`;
   })();
 
+  const prevStep = neighbour(-1);
+  const nextStep = neighbour(1);
   const paneProps = current
     ? {
         unitKey: `${slug}/${unitId}`,
@@ -227,8 +330,8 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
         step: {
           index: stepIdx,
           total: steps.length,
-          onPrev: stepIdx > 0 ? () => goToBeat(steps[stepIdx - 1]) : undefined,
-          onNext: stepIdx >= 0 && stepIdx < steps.length - 1 ? () => goToBeat(steps[stepIdx + 1]) : undefined,
+          onPrev: prevStep !== null ? () => goToBeat(prevStep) : undefined,
+          onNext: nextStep !== null ? () => goToBeat(nextStep) : undefined,
         },
         onShowInText: showInText,
         pinned: pinned !== null,
@@ -239,6 +342,23 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
     : null;
 
   const showDock = hasDemos && !demoHidden;
+  const pickZoom = (f: Fit, z: number) => {
+    setFit(f);
+    setZoom(z);
+  };
+
+  const chapterSelect = book.units.length > 1 && (
+    <select className="select plain chapter-select" aria-label="Chapter" value={unitId} onChange={(e) => onNavigate({ book: slug, unit: e.target.value })}>
+      {book.units.map((u) => (
+        <option key={u.id} value={u.id}>
+          {isNumbered(u.id) ? `${u.id}. ${u.title}` : u.title}
+        </option>
+      ))}
+    </select>
+  );
+
+  // Phone sheet: drag the bar up to open, down to close.
+  const drag = useRef<{ y: number; moved: boolean } | null>(null);
 
   return (
     <div className="app">
@@ -248,28 +368,14 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
         <button className="btn icon ghost" aria-pressed={tocOpen} onClick={() => setTocOpen((v) => !v)} aria-label="Contents" title="Contents (t)">
           <ListIcon />
         </button>
-        <select
-          className="select plain book-select"
-          aria-label="Book"
-          value={slug}
-          onChange={(e) => onNavigate({ book: e.target.value })}
-          title={book.title}
-        >
+        <select className="select plain book-select" aria-label="Book" value={slug} onChange={(e) => onNavigate({ book: e.target.value })} title={book.title}>
           {library.books.map((b) => (
             <option key={b.slug} value={b.slug}>
               {b.short}
             </option>
           ))}
         </select>
-        {book.units.length > 1 && (
-          <select className="select plain chapter-select" aria-label="Chapter" value={unitId} onChange={(e) => onNavigate({ book: slug, unit: e.target.value })}>
-            {book.units.map((u) => (
-              <option key={u.id} value={u.id}>
-                {isNumbered(u.id) ? `${u.id}. ${u.title}` : u.title}
-              </option>
-            ))}
-          </select>
-        )}
+        {!narrow && chapterSelect}
         {!narrow && section && (
           <button className="crumb" onClick={() => setTocOpen((v) => !v)} title="Contents (t)">
             <Inline md={sectionLabel(section)} />
@@ -277,28 +383,18 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
         )}
         <span className="spacer" />
         {!narrow && pageText && <span className="page-indicator">{pageText}</span>}
-        {!narrow && (
-          <div className="zoom" role="group" aria-label="Zoom">
+        {narrow ? (
+          <ZoomMenu fit={fit} zoom={zoom} onPick={pickZoom} compact />
+        ) : (
+          <div className="zoom" role="group" aria-label="Page size">
             <button className="btn icon ghost" onClick={() => zoomBy(-1)} disabled={zoom <= ZOOMS[0]} aria-label="Zoom out" title="Zoom out (−)">
               <Minus />
             </button>
-            <button className="zoom-level" onClick={() => setZoom(1)} title="Fit width (0)">
-              {zoom === 1 ? "Fit" : `${Math.round(zoom * 100)}%`}
-            </button>
+            <ZoomMenu fit={fit} zoom={zoom} onPick={pickZoom} compact={false} />
             <button className="btn icon ghost" onClick={() => zoomBy(1)} disabled={zoom >= ZOOMS[ZOOMS.length - 1]} aria-label="Zoom in" title="Zoom in (+)">
               <Plus />
             </button>
           </div>
-        )}
-        {narrow && (
-          <button
-            className="btn ghost zoom-cycle"
-            onClick={() => setPhoneZoom((z) => PHONE_ZOOMS[(PHONE_ZOOMS.indexOf(z) + 1) % PHONE_ZOOMS.length] ?? 1)}
-            aria-label="Zoom pages"
-            title="Zoom pages"
-          >
-            {phoneZoom === 1 ? "Fit" : `${Math.round(phoneZoom * 100)}%`}
-          </button>
         )}
         <button className={`btn search-btn${narrow ? " icon ghost" : ""}`} onClick={onSearch} aria-label="Search" title="Search (⌘K)">
           <Search />
@@ -321,25 +417,36 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
         )}
         <HelpButton open={help} onOpenChange={onHelp} />
       </header>
+      {narrow && (
+        <div className="subbar">
+          {chapterSelect}
+          <button className="subbar-section" onClick={() => setTocOpen(true)} aria-label="Open contents">
+            {section && <Inline md={sectionLabel(section)} />}
+          </button>
+          <span className="subbar-page">{pageText}</span>
+        </div>
+      )}
 
       <div className={`book-body${focus && showDock && !narrow ? " focus" : ""}${narrow ? " narrow" : ""}`}>
         {tocOpen && (
           <>
-            {narrow && <div className="scrim" onClick={() => setTocOpen(false)} />}
+            <div className="scrim" onClick={() => setTocOpen(false)} />
             <Contents
               title={book.units.length > 1 ? `${isNumbered(unitId) ? `${unitId}. ` : ""}${unitInfo.title}` : book.short}
+              unitKey={`${slug}/${unitId}`}
+              unit={unit}
               sections={unit?.sections ?? unitInfo.sections}
-              beats={beats}
               current={pos.section}
               activeDemo={current?.demo.id}
               onSection={(id) => {
-                reader.current?.scrollToSection(id, false);
-                if (narrow) setTocOpen(false);
+                const first = beats.find((b) => b.anchor.section === id);
+                reader.current?.scrollToSection(id, false, first?.anchor.id);
+                setTocOpen(false);
               }}
               onDemo={(anchor) => {
                 reader.current?.scrollToAnchor(anchor, false);
                 setPinned(null);
-                if (narrow) setTocOpen(false);
+                setTocOpen(false);
               }}
               onClose={() => setTocOpen(false)}
             />
@@ -352,7 +459,8 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
             unit={unit}
             markers={markers}
             active={hasDemos ? shown : -1}
-            zoom={narrow ? phoneZoom : zoom}
+            zoom={zoom}
+            fit={fit}
             flashKey={flashKey}
             bottomInset={narrow && showDock ? 72 : 0}
             onPosition={setPos}
@@ -384,8 +492,37 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
 
         {showDock && paneProps && narrow && (
           <aside className={`sheet${sheetOpen ? " open" : ""}`} aria-label="Demo">
-            <div className="sheet-bar">
-              <button className="sheet-toggle" onClick={() => setSheetOpen((v) => !v)} aria-expanded={sheetOpen}>
+            <div
+              className="sheet-bar"
+              onPointerDown={(e) => {
+                if ((e.target as HTMLElement).closest(".step-nav, .sheet-bar > .btn")) return;
+                const d = { y: e.clientY, moved: false };
+                drag.current = d;
+                const move = (ev: PointerEvent) => {
+                  const dy = ev.clientY - d.y;
+                  if (!d.moved && Math.abs(dy) > 40) {
+                    d.moved = true;
+                    setSheetOpen(dy < 0);
+                  }
+                };
+                const up = () => {
+                  window.removeEventListener("pointermove", move);
+                  window.removeEventListener("pointerup", up);
+                  // The click that follows a drag must not toggle the sheet back.
+                  setTimeout(() => (drag.current = null), 0);
+                };
+                window.addEventListener("pointermove", move);
+                window.addEventListener("pointerup", up);
+              }}
+            >
+              <span className="sheet-grip" aria-hidden />
+              <button
+                className="sheet-toggle"
+                onClick={() => {
+                  if (!drag.current?.moved) setSheetOpen((v) => !v);
+                }}
+                aria-expanded={sheetOpen}
+              >
                 <span className="sheet-text">
                   <span className="demo-title">
                     <Inline md={paneProps.beat.demo.title} />

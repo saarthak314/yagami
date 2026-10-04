@@ -106,8 +106,11 @@ export function Stage({
   }, [width, height]);
 
   const point = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    // The shell may CSS-scale the stage on narrow screens: map back to stage coordinates.
     const r = e.currentTarget.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
+    const sx = r.width ? width / r.width : 1;
+    const sy = r.height ? height / r.height : 1;
+    return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
   };
 
   return (

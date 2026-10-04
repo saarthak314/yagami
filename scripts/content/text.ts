@@ -487,7 +487,14 @@ export async function textAnchors(book: BookConfig, unitId: string): Promise<voi
       prevLine = l;
 
       // Headings.
-      const num = /^((?:\d+\.)*\d+)\.?\s+([A-Z0-9].{0,90})$/.exec(txt);
+      const numM = /^((?:\d+\.)*\d+)\.?\s+([A-Z0-9].{0,90})$/.exec(txt);
+      // Reject chart axis tick rows ("1 2 3 4 …", "0.00024 0.00011"): a heading title needs words.
+      const titleHasWords = (t: string) => {
+        const chars = t.replace(/\s/g, "");
+        const letters = (chars.match(/[A-Za-z]/g) ?? []).length;
+        return /[A-Za-z]{3,}/.test(t) && letters >= 0.5 * chars.length;
+      };
+      const num = numM && titleHasWords(numM[2]) ? numM : null;
       // Numbered headings can run nearly the full column width ("3 MALLOC PROGRAMMING LAB OVERVIEW").
       const short = (l.r - l.l < 0.85 * colW || (num !== null && txt.length <= 70)) && !/[.,;]$/.test(txt);
       let heading: { id: string; title: string } | null = null;

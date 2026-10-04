@@ -71,6 +71,13 @@ export const Pin = () => (
     <path d="M6 2.5h4M7 2.5v4L4.5 9h7L9 6.5v-4M8 9v4.5" />
   </Icon>
 );
+/** Page size menu (phones). */
+export const ZoomIcon = () => (
+  <Icon>
+    <circle cx="7" cy="7" r="4.25" />
+    <path d="M10.25 10.25L13.5 13.5M5 7h4M7 5v4" />
+  </Icon>
+);
 export const Minus = () => (
   <Icon>
     <path d="M3.5 8h9" />

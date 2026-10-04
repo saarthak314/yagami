@@ -7,6 +7,9 @@ import { loaderFor, type BeatRef } from "../lib/data";
 import { Inline } from "../lib/inline";
 import { ChevronLeft, ChevronRight, Collapse, Expand, Locate, Pin } from "../ui/icons";
 
+/** Narrowest width a demo is laid out at (wider than the phone sheet and the smallest pane). */
+const STAGE_MIN = 480;
+
 const lazyCache = new Map<string, ComponentType<DemoProps>>();
 function lazyComponent(unitKey: string, name: string): ComponentType<DemoProps> | null {
   const key = `${unitKey}/${name}`;
@@ -141,6 +144,9 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
   }, []);
 
   const Demo = lazyComponent(unitKey, demo.component);
+  // Demos are laid out for at least STAGE_MIN px; narrower stages render at that width and scale down.
+  const scale = size.w > 0 && size.w < STAGE_MIN ? size.w / STAGE_MIN : 1;
+  const logical = { w: Math.round(size.w / scale), h: Math.round(size.h / scale) };
   const setParam = (id: string, v: ParamValue) => setEdits((e) => ({ ...e, [id]: v }));
 
   return (
@@ -154,6 +160,7 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
         </header>
         <div className="demo-stage" ref={stageRef}>
           {size.w > 0 && size.h > 0 && (
+            <div className="stage-scale" style={scale < 1 ? { width: logical.w, height: logical.h, transform: `scale(${scale})` } : undefined}>
             <DemoBoundary key={`${demo.id}`} onError={onError}>
               {Demo ? (
                 <Suspense fallback={null}>
@@ -162,8 +169,8 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
                     preset={preset?.id ?? ""}
                     playing={playing}
                     resetKey={resetKey}
-                    width={size.w}
-                    height={size.h}
+                    width={logical.w}
+                    height={logical.h}
                     setReadouts={setReadouts}
                   />
                   <ReadySignal onReady={onReady} />
@@ -172,6 +179,7 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
                 <MissingDemo onError={onError} name={demo.component} />
               )}
             </DemoBoundary>
+            </div>
           )}
         </div>
       </div>
@@ -205,6 +213,7 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
                 <span className="control-label">Setup</span>
                 <select
                   className="select"
+                  aria-label="Setup"
                   value={preset?.id}
                   onChange={(e) => {
                     setPresetOverride(e.target.value);
@@ -264,6 +273,9 @@ function subscriptsMd(md: string): string {
     .join("");
 }
 
+/** Label text without $…$ math markup, for screen readers. */
+const plainLabel = (md: string) => md.replace(/\$([^$]*)\$/g, (_, m: string) => m.replace(/[\\{}]/g, "").replace(/_/g, " ")).trim();
+
 function ControlView({ spec, value, onChange }: { spec: ControlSpec; value: ParamValue | undefined; onChange: (v: ParamValue) => void }) {
   if (spec.type === "slider") {
     const v = Number(value ?? spec.min);
@@ -273,7 +285,7 @@ function ControlView({ spec, value, onChange }: { spec: ControlSpec; value: Para
         <span className="control-label">
           <Inline md={subscriptsMd(spec.label)} />
         </span>
-        <input type="range" className="range" min={spec.min} max={spec.max} step={spec.step} value={v} onChange={(e) => onChange(Number(e.target.value))} />
+        <input type="range" className="range" aria-label={plainLabel(spec.label)} aria-valuetext={`${v.toFixed(decimals)}${spec.unit ? ` ${spec.unit}` : ""}`} min={spec.min} max={spec.max} step={spec.step} value={v} onChange={(e) => onChange(Number(e.target.value))} />
         <span className="control-value">
           {v.toFixed(decimals)}
           {spec.unit ? ` ${spec.unit}` : ""}
@@ -284,7 +296,7 @@ function ControlView({ spec, value, onChange }: { spec: ControlSpec; value: Para
   if (spec.type === "toggle") {
     return (
       <label className="control toggle">
-        <input type="checkbox" className="check" checked={Boolean(value)} onChange={(e) => onChange(e.target.checked)} />
+        <input type="checkbox" className="check" aria-label={plainLabel(spec.label)} checked={Boolean(value)} onChange={(e) => onChange(e.target.checked)} />
         <span className="control-label">
           <Inline md={subscriptsMd(spec.label)} />
         </span>
@@ -296,7 +308,7 @@ function ControlView({ spec, value, onChange }: { spec: ControlSpec; value: Para
       <span className="control-label">
           <Inline md={subscriptsMd(spec.label)} />
         </span>
-      <select className="select" value={String(value ?? spec.options[0]?.value)} onChange={(e) => onChange(e.target.value)}>
+      <select className="select" aria-label={plainLabel(spec.label)} value={String(value ?? spec.options[0]?.value)} onChange={(e) => onChange(e.target.value)}>
         {spec.options.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}

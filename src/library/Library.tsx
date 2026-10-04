@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import type { Domain, Library } from "../types";
 import { assetUrl, isNumbered, loadUnit, planFor } from "../lib/data";
-import { LAST_BOOK, load, progressKey, type Progress } from "../lib/store";
+import { LAST_BOOK, RESUME, load, progressKey, type Progress } from "../lib/store";
 import { hashFor } from "../lib/route";
 import { Inline } from "../lib/inline";
 import { Check, Copy } from "../ui/icons";
@@ -50,11 +50,15 @@ function Continue({ library }: { library: Library }) {
   const where = [book.units.length > 1 ? (isNumbered(unit.id) ? `${unit.id}. ${unit.title}` : unit.title) : null, section && (isNumbered(section.id) ? `${section.id} ${section.title}` : section.title)]
     .filter(Boolean)
     .join(" · ");
+  const pageOf = p.pages && p.pageIndex !== undefined ? `p. ${p.page} of ${p.page === String(p.pageIndex + 1) ? p.pages : `${p.pages} pages`}` : "";
   return (
-    <a className="continue" href={hashFor({ book: book.slug, unit: unit.id, section: p.section })}>
+    <a className="continue" href={hashFor({ book: book.slug, unit: unit.id, section: p.section })} onClick={() => sessionStorage.setItem(RESUME, book.slug)}>
       <span className="continue-label">Continue reading</span>
-      <span className="continue-title">{book.short}</span>
-      <span className="continue-where">{where}</span>
+      <span className="continue-title">{book.title}</span>
+      <span className="continue-where">
+        {where}
+        {pageOf && <span className="continue-page">{pageOf}</span>}
+      </span>
       <span className="progress" aria-label={`${Math.round(p.fraction * 100)}% through`}>
         <span style={{ width: `${Math.max(2, Math.round(p.fraction * 100))}%` }} />
       </span>
@@ -89,7 +93,7 @@ function AddHint({ label = "Add a book" }: { label?: string }) {
   );
 }
 
-export function LibraryView({ library }: { library: Library }) {
+export function LibraryView({ library, notFound }: { library: Library; notFound?: string }) {
   useEffect(() => {
     document.title = "yagami";
   }, []);
@@ -114,6 +118,7 @@ export function LibraryView({ library }: { library: Library }) {
   return (
     <main className="library">
       <div className="library-inner">
+        {notFound && <p className="not-found">Nothing at {decodeURIComponent(notFound)}. Here is the library.</p>}
         <Continue library={library} />
 
         <div className="library-head">

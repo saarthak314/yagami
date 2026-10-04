@@ -43,10 +43,18 @@ export function useStored<T>(key: string, fallback: T): [T, (v: T | ((prev: T) =
 export interface Progress {
   unit: string;
   section: string;
+  /** Printed page label. */
   page: string;
+  /** Exact spot at the reading line: page index and fraction of that page. */
+  pageIndex?: number;
+  pageFrac?: number;
+  /** Pages in the unit. */
+  pages?: number;
   /** 0..1 through the unit's pages. */
   fraction: number;
 }
 
 export const progressKey = (book: string) => `yagami.progress.${book}`;
 export const LAST_BOOK = "yagami.lastBook";
+/** sessionStorage: set by Continue so the book reopens at the exact saved spot. */
+export const RESUME = "yagami.resume";
