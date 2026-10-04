@@ -57,14 +57,17 @@ When it finishes, any demo that failed comes with the `yagami fix` command to re
    variants for zoom and high-DPI screens. The text is never re-typeset; you read the original pages.
 2. **Anchors.** Paragraphs, headings, equations, figures and tables are located from the PDF's text layer (or with
    local OCR for scans), including two-column layouts. No model is involved.
-3. **Plan.** A model reads the unit (text plus page images) and proposes demos, each tied to specific paragraphs, with
-   presets, controls and readouts that let you check an equation or algorithm numerically.
-4. **Build and verify.** Each demo is written as a small React component against a shared drawing kit, typechecked,
-   then screenshotted at every step in headless Chromium and reviewed; failures go back for revision. Demos stream
-   through these stages independently, so the first ones are ready while others are still being planned.
+3. **Plan.** A model reads the unit (text plus page images) and writes a short outline of demos, each tied to
+   specific paragraphs. Each demo is then made in parallel: if it fits one of the built-in templates (function plot,
+   simulation, vector diagram, matrix operations, random experiment, table, algorithm step-through) the model only
+   writes its settings; otherwise it writes a small React component against a shared drawing kit.
+4. **Check.** Every demo is opened in headless Chromium at every step and checked by code first (errors, blank
+   stage, broken or wrong readouts against values the text pins down, clipped or overlapping labels); problems go
+   straight back to the model. A model review of one contact sheet runs only when the code checks can't judge it.
+   Demos stream through these stages independently, so the first ones are ready while others are still being made.
 
-Models: Claude Opus for planning, Claude Sonnet for writing and reviewing demos. A paper typically takes a few
-minutes and a few dollars; spend is shown live and logged to `work/usage.jsonl`.
+Models: Claude Opus for the outline, Claude Sonnet for writing and reviewing demos. A short paper typically takes
+about a minute and well under a dollar; spend is shown live and logged to `work/usage.jsonl`.
 
 ## Layout
 
