@@ -1,6 +1,7 @@
-// The reader site: serve it in the foreground until ctrl-c.
+// The reader site: started in the background as soon as a run begins (so `o`
+// works while demos are still being made), then kept up until the user quits.
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 
 export const BASE = "http://127.0.0.1:5190"; // vite.config.ts (strictPort)
@@ -28,7 +29,8 @@ export function bookUrl(slug: string, unit?: string) {
   return `${BASE}/#/${slug}${unit ? `/${unit}` : ""}`;
 }
 
-function open(url: string) {
+export function openUrl(url: string) {
+  if (process.env.YAGAMI_NO_OPEN) return;
   const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
   try {
     spawn(cmd, [url], { detached: true, stdio: "ignore" }).unref();
@@ -37,27 +39,29 @@ function open(url: string) {
   }
 }
 
-/**
- * Open `url`, serving the site if it isn't already running. Resolves only when
- * the server stops (ctrl-c), or right away if another yagami is serving it.
- */
-export async function serve(url: string, say: (line: string) => void): Promise<void> {
-  if (await siteUp()) {
-    say(`${url}  (already running)`);
-    open(url);
-    return;
+export interface Site {
+  /** The site answers. */
+  up: boolean;
+  /** We started it (and stop it on quit); false when another yagami is serving. */
+  owned: boolean;
+  error?: string;
+  stop(): void;
+}
+
+/** Start the dev server unless ours is already running. Never throws. */
+export async function startSite(): Promise<Site> {
+  if (await siteUp()) return { up: true, owned: false, stop() {} };
+  if (await portBusy()) return { up: false, owned: false, error: "port 5190 is used by another program", stop() {} };
+  const child: ChildProcess = spawn(process.execPath, [path.resolve("node_modules/vite/bin/vite.js"), "--clearScreen", "false"], { stdio: "ignore" });
+  const stop = () => {
+    if (child.exitCode === null) child.kill();
+  };
+  process.once("exit", stop);
+  for (let i = 0; i < 60; i++) {
+    if (await siteUp()) return { up: true, owned: true, stop };
+    if (child.exitCode !== null) break;
+    await new Promise((r) => setTimeout(r, 250));
   }
-  if (await portBusy()) throw new Error("port 5190 is in use by another program");
-  const child = spawn(process.execPath, [path.resolve("node_modules/vite/bin/vite.js"), "--clearScreen", "false"], { stdio: "ignore" });
-  for (let i = 0; i < 60 && !(await siteUp()); i++) await new Promise((r) => setTimeout(r, 250));
-  if (!(await siteUp())) {
-    child.kill();
-    throw new Error("the site did not start");
-  }
-  say(`${url}  (ctrl-c to stop)`);
-  open(url);
-  const stop = () => child.kill();
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
-  await new Promise((r) => child.on("exit", r));
+  stop();
+  return { up: false, owned: false, error: "the site did not start", stop() {} };
 }

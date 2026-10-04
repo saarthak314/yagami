@@ -21,7 +21,7 @@ export type PipelineEvent =
   | { type: "progress"; unit: string; stage: Stage; done: number; total: number; label?: string }
   /** Plan finished: the demos that will be built. */
   | { type: "plan"; unit: string; demos: { id: string; title: string; beats: number }[] }
-  | { type: "demo"; unit: string; id: string; phase: DemoPhase; round?: number; beatsPassed?: number; beats?: number; detail?: string }
+  | { type: "demo"; unit: string; id: string; phase: DemoPhase; round?: number; beatsPassed?: number; beats?: number; detail?: string; title?: string }
   /** Running API spend in dollars (total for this run). */
   | { type: "cost"; total: number }
   | { type: "log"; level: "info" | "warn" | "error"; message: string }

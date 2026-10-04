@@ -291,7 +291,11 @@ export interface PlanOpts {
 /** Hash of everything the planner sees (for incremental runs). */
 export function planInputHash(book: BookConfig, unitId: string, h: (...p: string[]) => string): string {
   const c = loadCtx(book, unitId);
-  return h(PLAN_VERSION, systemFor(book), JSON.stringify(c.unit), JSON.stringify(c.text));
+  // Only what the planner reads: structure and text. Page-image details (sizes,
+  // srcset variants) change when images are re-rendered and must not trigger a re-plan.
+  const { title, sections, anchors } = c.unit;
+  const pages = c.unit.pages.map((p) => p.label);
+  return h(PLAN_VERSION, systemFor(book), JSON.stringify({ title, sections, anchors, pages }), JSON.stringify(c.text));
 }
 
 export async function planUnit(book: BookConfig, unitId: string, opts: PlanOpts = {}): Promise<DemoPlan> {

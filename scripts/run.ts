@@ -8,8 +8,9 @@
 // Unchanged work is skipped (hash of inputs per step) unless `force` is set.
 
 import fs from "node:fs";
+import path from "node:path";
 import type { BookConfig, DemoSpec } from "../src/types";
-import { loadBook, unitOf } from "./books";
+import { loadBook, unitJsonPath, unitOf } from "./books";
 import { onCost, pool } from "./lib/claude";
 import type { Emit, Stage } from "./lib/events";
 import { Limit } from "./lib/limit";
@@ -67,8 +68,18 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
 
     // Content: cheap and local; do every unit first so the reader is usable early.
     const contentOk = new Set<string>();
+    const codeHash = contentCodeHash();
     for (const unit of units) {
       try {
+        // Skip pages + anchors when nothing they depend on changed (PDF, book settings, content code).
+        const u = unitOf(book, unit);
+        const key = hash(fileHash(book.source.pdf) ?? "", JSON.stringify([book.source, book.recolor, u.pages]), codeHash);
+        if (!opts.force && readCache(slug, unit).content === key && fs.existsSync(unitJsonPath(slug, unit))) {
+          for (const stage of ["render", "anchors", "assemble"] as const)
+            if (steps.has(stage)) emit({ type: "stage", unit, stage, status: "skip", detail: "unchanged" });
+          contentOk.add(unit);
+          continue;
+        }
         for (const [stage, fn] of [
           ["render", renderUnit],
           ["anchors", anchorUnit],
@@ -79,6 +90,7 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
           await fn(book, unit);
           emit({ type: "stage", unit, stage, status: "done" });
         }
+        if (["render", "anchors", "assemble"].every((s) => steps.has(s as Stage))) updateCache(slug, unit, (c) => void (c.content = key));
         contentOk.add(unit);
       } catch (e) {
         emit({ type: "stage", unit, stage: "anchors", status: "error", detail: (e as Error).message });
@@ -140,7 +152,7 @@ async function runUnitDemos(
   const enqueue = (spec: DemoSpec) => {
     if (!selected(spec.id)) return;
     total++;
-    emit({ type: "demo", unit, id: spec.id, phase: "queued", beats: spec.beats.length });
+    emit({ type: "demo", unit, id: spec.id, phase: "queued", beats: spec.beats.length, title: spec.title });
     tasks.push(
       limit.run(async () => {
         const out = await demoTask(book, unit, spec, steps, opts, getEnv);
@@ -153,6 +165,10 @@ async function runUnitDemos(
 
   // Plan (streamed) or reuse the existing plan.
   const planFile = paths.plan(slug, unit);
+  // A re-plan streams into plan.json; keep the previous plan until it completes, and put
+  // it back if the last run stopped mid-plan (the next step decides whether to re-plan).
+  const planBackup = planFile.replace(/\.json$/, ".prev.json");
+  if (fs.existsSync(planBackup)) fs.renameSync(planBackup, planFile);
   let demos: DemoSpec[];
   if (steps.has("plan")) {
     const inputHash = planInputHash(book, unit, hash);
@@ -167,8 +183,10 @@ async function runUnitDemos(
       emit({ type: "stage", unit, stage: "plan", status: "start" });
       // Building/verifying overlaps planning: each demo starts as soon as it is accepted.
       if (doVerify) void getEnv();
+      if (fs.existsSync(planFile)) fs.copyFileSync(planFile, planBackup);
       const plan = await planUnit(book, unit, { onDemo: enqueue });
       updateCache(slug, unit, (c) => void (c.plan = inputHash));
+      fs.rmSync(planBackup, { force: true });
       demos = plan.demos;
       emit({ type: "stage", unit, stage: "plan", status: "done", detail: `${demos.length} demos` });
     }
@@ -235,4 +253,18 @@ async function demoTask(book: BookConfig, unit: string, spec: DemoSpec, steps: S
     emit({ type: "demo", unit, id: spec.id, phase: "fail", detail: (e as Error).message });
     return { id: spec.id, ok: false, why: (e as Error).message };
   }
+}
+
+/** Hash of the content pipeline's source, so a change to the extractor re-runs it. */
+function contentCodeHash(): string {
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const f = path.join(dir, e.name);
+      if (e.isDirectory()) walk(f);
+      else if (f.endsWith(".ts")) files.push(f);
+    }
+  };
+  walk(path.resolve("scripts/content"));
+  return hash(...files.sort().map((f) => fs.readFileSync(f)));
 }
