@@ -2,7 +2,8 @@
 // bold trail, a swept sector for equal-area arguments) and an optional vector field u(x, y), v(x, y).
 
 import { useMemo, useRef } from "react";
-import { Stage, draw, theme } from "../kit";
+import { draw, theme } from "../kit";
+import { Stage } from "./stage";
 import { compile, type Compiled, type Env } from "./expr";
 import type { ParametricPlotConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, opt, paramEnv, plotFrame, readoutValues, spread, textWidth, val, type TemplateProps } from "./runtime";

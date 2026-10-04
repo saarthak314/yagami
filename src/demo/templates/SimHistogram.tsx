@@ -2,7 +2,8 @@
 // approaches the expected distribution.
 
 import { useMemo } from "react";
-import { Stage, axes, draw, rng, theme, useSim } from "../kit";
+import { axes, draw, rng, theme, useSim } from "../kit";
+import { Stage } from "./stage";
 import { compile, type Env } from "./expr";
 import type { SimHistogramConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, fmtTick, logTicks, niceTicks, opt, paramEnv, randomFns, readoutValues, val, type TemplateProps } from "./runtime";

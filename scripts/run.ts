@@ -21,7 +21,8 @@ import { fileHash, hash, readCache, updateCache } from "./demos/cache";
 import { loadCtx, loadPlan, paths, setSpecSink } from "./demos/common";
 import { buildDemo, buildEffort, generateDemo, loadConvo, reviseDemo, warmBuilder } from "./demos/build";
 import { cleanStaleCandidates, cleanupRaces, raceDemo, raceEnabled, raceIdle } from "./demos/race";
-import { legacyPlanner, type OutlineDemo, PlanAssembler, PLAN_KEY_PREFIX, planInputHash, planOutline, planUnit } from "./demos/plan";
+import { legacyPlanner, type OutlineDemo, PlanAssembler, PLAN_KEY_PREFIX, planInputHash, planOutline, planUnit, useDirect } from "./demos/plan";
+import { planDirect, warmDirect } from "./demos/direct";
 import { type CheckedOpts, closeEnv, type DemoResult, previousVerdict, startEnv, type VerifyEnv, verifyDemoChecked, writeReport } from "./demos/verify";
 import { fixEffort } from "./lib/claude";
 import { generateTemplateDemo, reviseTemplate, skipsReview, templateArtifact, warmTemplates } from "./demos/template";
@@ -103,8 +104,12 @@ export async function runBook(slug: string, opts: RunOpts, emitFn: Emit): Promis
     const makesDemos = wantsDemos && (!!opts.force || !!opts.note || units.some((u) => !fs.existsSync(paths.plan(slug, u))));
     if (makesDemos && steps.has("verify")) void getEnv();
     // Every effort the builder will run at: the race's drafts, and fix turns.
-    const builderEfforts = [...new Set([...(raceEnabled() ? ["low" as const, "medium" as const] : [buildEffort()]), fixEffort()])];
-    if (makesDemos && steps.has("plan") && steps.has("build") && !legacyPlanner()) void domainReady.then(() => Promise.all(builderEfforts.map((e) => warmBuilder(book, e))));
+    // Direct planning (short units, YAGAMI_DIRECT=on) warms its own prompt (builder + templates + direct
+    // block) instead of the builder's first-draft effort, which it then doesn't need.
+    const direct = units.every((u) => useDirect(book, u));
+    const builderEfforts = [...new Set([...(raceEnabled() ? ["low" as const, "medium" as const] : direct ? [] : [buildEffort()]), fixEffort()])];
+    if (makesDemos && steps.has("plan") && steps.has("build") && !legacyPlanner())
+      void domainReady.then(() => Promise.all([...builderEfforts.map((e) => warmBuilder(book, e)), ...(units.some((u) => useDirect(book, u)) ? [warmDirect(book)] : [])]));
 
     // Sharper page variants render in the background once a unit's base pages are ready.
     const codeHash = contentCodeHash();
@@ -263,13 +268,13 @@ async function runUnitDemos(
   };
 
   /** An outlined demo: spec + code in one conversation, then the checked verify loop. */
-  const enqueueOutlined = (o: OutlineDemo, plan: PlanAssembler, outlined: OutlineDemo[]) => {
+  const enqueueOutlined = (o: OutlineDemo, plan: PlanAssembler, outlined: OutlineDemo[], prefill?: string) => {
     if (!selected(o.id)) return;
     total++;
     emit({ type: "demo", unit, id: o.id, phase: "queued", beats: o.beats.length, title: o.title });
     tasks.push(
       limit.run(async () => {
-        const out = (await pages) ? await generatedTask(book, unit, o, plan, outlined, steps, opts, getEnv) : { id: o.id, ok: false, why: "the pages could not be made" };
+        const out = (await pages) ? await generatedTask(book, unit, o, plan, outlined, steps, opts, getEnv, prefill) : { id: o.id, ok: false, why: "the pages could not be made" };
         if (doBuild) emit({ type: "progress", unit, stage: "build", done: ++built, total, label: "demos" });
         if (doVerify) emit({ type: "progress", unit, stage: "verify", done: ++verified, total, label: "demos" });
         return out;
@@ -311,17 +316,27 @@ async function runUnitDemos(
         // spec + code conversation. plan.json fills in as specs are accepted.
         const outlined: OutlineDemo[] = [];
         const assembler = new PlanAssembler(book, unit, { demos: outlined });
+        const direct = useDirect(book, unit);
         // Write the builder prompt to the cache while the outline streams (demos then only read it).
-        if (doBuild) void warmBuilder(book, buildEffort());
+        if (doBuild && !direct) void warmBuilder(book, buildEffort());
         try {
-          await planOutline(book, unit, {
-            onDemo: (o) => {
-              // Warm the template prompt when the outline marks its first template demo.
-              if (o.template && doBuild) void warmTemplates(book);
-              outlined.push(o);
-              enqueueOutlined(o, assembler, outlined);
-            },
-          });
+          if (direct)
+            // Short unit: no outline — groups write their demos in full (spec + config or code) directly.
+            await planDirect(book, unit, {
+              onDemo: (o, prefill) => {
+                outlined.push(o);
+                enqueueOutlined(o, assembler, outlined, prefill);
+              },
+            });
+          else
+            await planOutline(book, unit, {
+              onDemo: (o) => {
+                // Warm the template prompt when the outline marks its first template demo.
+                if (o.template && doBuild) void warmTemplates(book);
+                outlined.push(o);
+                enqueueOutlined(o, assembler, outlined);
+              },
+            });
           emit({ type: "stage", unit, stage: "plan", status: "done", detail: `${outlined.length} demos` });
           emit({ type: "plan", unit, demos: outlined.map((o) => ({ id: o.id, title: o.title, beats: o.beats.length })) });
           const outcomes = await Promise.all(tasks);
@@ -431,6 +446,8 @@ async function generatedTask(
   steps: Set<Stage>,
   opts: RunOpts,
   getEnv: () => Promise<VerifyEnv>,
+  /** The demo's first reply, already written (direct planning). */
+  prefill?: string,
 ): Promise<DemoOutcome> {
   const slug = book.slug;
   // The real unit (pages + images exist now): crops for the model come from it. plan.c may be the
@@ -438,15 +455,16 @@ async function generatedTask(
   const c = loadCtx(book, unit);
   try {
     if (o.template) {
-      const tg = await generateTemplateDemo(c, o, plan, outlined);
+      const tg = await generateTemplateDemo(c, o, plan, outlined, { prefill });
       if (tg.spec) {
         updateCache(slug, unit, (c) => void (c.demos[tg.spec!.id] = { spec: hash(JSON.stringify(tg.spec)), code: artifactHash(slug, unit, tg.spec!), verified: false }));
         return verifyTemplate(book, unit, tg.spec, steps, opts, getEnv, (s) => plan.accept(s));
       }
-      // No valid config: this demo is built as code after all.
+      // No valid config: this demo is built as code after all (a fresh build; the prefill was a config).
       delete o.template;
+      prefill = undefined;
     }
-    if (raceEnabled()) {
+    if (raceEnabled() && !prefill) {
       const race = await raceDemo(c, { kind: "outline", o, plan, others: outlined }, getEnv, { verify: steps.has("verify"), review: true });
       if (!race.spec) {
         emit({ type: "demo", unit, id: o.id, phase: "fail", detail: race.why });
@@ -468,7 +486,7 @@ async function generatedTask(
       updateCache(slug, unit, (cc) => void (cc.demos[spec.id] = { spec: hash(JSON.stringify(final)), code: fileHash(file), verified: result.pass }));
       return { id: spec.id, ok: result.pass, why: result.pass ? undefined : (result.beats.find((b) => !b.pass)?.issues[0] ?? "verify failed"), result };
     }
-    const g = await generateDemo(c, o, plan, outlined);
+    const g = await generateDemo(c, o, plan, outlined, { prefill });
     if (!g.spec) {
       emit({ type: "demo", unit, id: o.id, phase: "fail", detail: g.why });
       return { id: o.id, ok: false, why: g.why ?? "no usable spec" };

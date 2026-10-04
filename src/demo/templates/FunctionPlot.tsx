@@ -1,7 +1,8 @@
 // function-plot: 1–4 curves y = f(x; params) with an optional marker, sweep and annotated points.
 
 import { useMemo, useRef } from "react";
-import { Stage, axes, draw, theme } from "../kit";
+import { axes, draw, theme } from "../kit";
+import { Stage } from "./stage";
 import { compile, type Compiled, type Env } from "./expr";
 import type { FunctionPlotConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, fmtTick, logTicks, niceTicks, opt, paramEnv, readoutValues, spread, textWidth, val, type TemplateProps } from "./runtime";

@@ -4,9 +4,10 @@
 // the per-token RMS across stages as a line.
 
 import { useMemo, useRef } from "react";
-import { Stage, diverging, draw, matmul, randMatrix, rng, theme, transpose } from "../kit";
+import { diverging, draw, matmul, randMatrix, rng, theme, transpose } from "../kit";
+import { Stage } from "./stage";
 import { num, type Compiled, type Env, type Value } from "./expr";
-import type { LayerStackConfig, Sublayer } from "./configs";
+import { layerStackStatic, type LayerStackConfig, type Sublayer } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, fmtTick, niceTicks, opt, paramEnv, readoutValues, stepIndex, textWidth, val, type TemplateProps } from "./runtime";
 import { LABEL_FONT } from "./ui";
 
@@ -85,11 +86,9 @@ export default function LayerStack({ config, params, playing, resetKey, width, h
     };
     const tokens = config.tokens.slice(0, 10);
     const n = tokens.length;
-    const d = int(c.dModel, 16, 4, 64);
-    const dff = int(c.dff, 4 * d, 4, 256);
-    const L = int(c.layers, 1, 1, 8);
-    const h = Math.min(int(c.heads, 2, 1, 8), d);
-    const dk = Math.max(1, Math.floor(d / h));
+    // Sizes come from the same function validation uses (so a spec's expectations match what renders).
+    const st = layerStackStatic(config, env);
+    const { d, dff, L, h, dk } = st;
     const residual = flag(c.residual, true);
     const norm = normOf();
     const embedScale = flag(c.embedScale, true);
@@ -97,7 +96,7 @@ export default function LayerStack({ config, params, playing, resetKey, width, h
     const pRaw = c.dropout !== undefined ? val(c.dropout, env) : 0;
     const p = Number.isFinite(pRaw) ? Math.max(0, Math.min(0.9, pRaw)) : 0;
     const focus = Math.max(0, Math.min(n - 1, int(c.focus, 0, 0, n - 1)));
-    const subs: Sublayer[] = config.sublayers?.length ? config.sublayers : ["attention", "ffn"];
+    const subs: Sublayer[] = st.subs;
 
     const next = rng(config.seed ?? 1);
     // Embeddings ~ N(0, 1/d) (RMS 1/√d); ×√d brings them to the scale of the positional encodings.
@@ -152,7 +151,7 @@ export default function LayerStack({ config, params, playing, resetKey, width, h
       stages.push({ label: "final LayerNorm", box: firstBox + subs.length * 2, layer: L, X });
     }
     const rmsList = stages.map((st) => meanRms(st.X));
-    const perLayer = subs.reduce((a, sub) => a + (sub === "ffn" ? 2 * d * dff + dff + d : 4 * d * d), 0);
+    const perLayer = st.perLayer;
     const boxes = [embedScale ? "embedding × √d" : "embedding", ...(posenc ? ["+ positional encoding"] : []), ...subs.flatMap((sub) => (norm === "pre" ? [`${BOX_LABEL[sub]}`, "+ residual"] : [BOX_LABEL[sub], norm === "post" ? (residual ? "add & norm" : "norm") : residual ? "add" : "—"])), ...(norm === "pre" ? ["final LayerNorm"] : [])];
     // Each stage's heatmap uses its own symmetric scale (98th percentile of |x|) so its pattern stays
     // readable; growth across stages is what the RMS line shows.

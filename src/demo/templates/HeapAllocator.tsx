@@ -3,7 +3,8 @@
 // coalescing are simulated step by step. With `compare`, several policies run the same trace side by side.
 
 import { useMemo, useRef } from "react";
-import { Stage, draw, rng, theme } from "../kit";
+import { draw, rng, theme } from "../kit";
+import { Stage } from "./stage";
 import { compile, compileField, type Compiled, type Env, type Value } from "./expr";
 import type { FitPolicy, HeapAllocatorConfig, HeapRequest } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, fmtTick, niceTicks, opt, paramEnv, randomFns, readoutValues, stepIndex, textWidth, val, type TemplateProps } from "./runtime";

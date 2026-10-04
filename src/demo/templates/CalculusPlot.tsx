@@ -2,7 +2,8 @@
 // Riemann sums, a shaded area — and optional stacked graphs of f′ and ∫f sharing the x-axis.
 
 import { useMemo, useRef } from "react";
-import { Stage, draw, theme } from "../kit";
+import { draw, theme } from "../kit";
+import { Stage } from "./stage";
 import type { Env } from "./expr";
 import type { CalculusPlotConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, extent, opt, paramEnv, plotFrame, readoutValues, textWidth, val, type TemplateProps } from "./runtime";

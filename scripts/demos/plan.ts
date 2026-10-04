@@ -317,7 +317,7 @@ interface DemoPlan {
 }
 
 /** Sections that never get demos (and whose pages aren't worth sending). */
-const SKIP_SECTION = /^(references|bibliography|acknowledg(e)?ments?|keywords|ccs-concepts|acm-reference-format)/;
+export const SKIP_SECTION = /^(references|bibliography|acknowledg(e)?ments?|keywords|ccs-concepts|acm-reference-format)/;
 
 export interface PlanOpts {
   /** Planner effort (Opus 5.5). */
@@ -679,7 +679,7 @@ ${catalog}
 }
 
 /** Normalise one outlined demo against the unit and the demos accepted so far. Returns problems (empty = ok). */
-function fixOutline(o: OutlineDemo, c: Ctx, state: PlanState, templateIds: Set<string> = new Set()): string[] {
+export function fixOutline(o: OutlineDemo, c: Ctx, state: PlanState, templateIds: Set<string> = new Set()): string[] {
   const errs: string[] = [];
   // Unknown or "custom" template marks mean the code path.
   if (o.template !== undefined && !templateIds.has(o.template)) delete o.template;
@@ -729,7 +729,7 @@ function overlap(a: Set<string>, b: Set<string>): number {
 }
 
 /** True when `o` looks like a demo already accepted (same template or near-identical title + idea). */
-function duplicateOf(o: OutlineDemo, accepted: OutlineDemo[]): OutlineDemo | undefined {
+export function duplicateOf(o: OutlineDemo, accepted: OutlineDemo[]): OutlineDemo | undefined {
   const tw = words(o.title);
   const iw = words(`${o.title} ${o.idea}`);
   return accepted.find((x) => {
@@ -763,7 +763,7 @@ function maxDemos(pages: number): number {
   return pages <= 3 ? 5 : pages <= 6 ? 6 : 7;
 }
 
-interface OutlinePart {
+export interface OutlinePart {
   /** Page labels in this part, in order. */
   pages: string[];
   anchors: Ctx["unit"]["anchors"];
@@ -843,10 +843,19 @@ export function outlineParts(c: Ctx, keep: Ctx["unit"]["anchors"]): OutlinePart[
   }
   if (!starts) return whole();
   const bounds = [...starts, keep.length];
-  const runs = starts.map((s, j) => keep.slice(s, bounds[j + 1]));
-  const out: OutlinePart[] = runs.map((anchors) => ({ pages: pagesOf(anchors), anchors, sections: sectionsOf(anchors), cap: 0 }));
-  // Share the cap by text length (largest remainder), at least 1 per part.
-  const sums = runs.map((r) => r.reduce((n, a) => n + len(a), 0));
+  return shareCaps(c, starts.map((s, j) => keep.slice(s, bounds[j + 1])), cap);
+}
+
+/** Text length of an anchor for balancing parts (headings weigh nothing). */
+function anchorLen(c: Ctx, a: Anchor): number {
+  return a.kind === "heading" ? 0 : (c.text.text[a.id] ?? "").length + 40;
+}
+
+/** Parts from contiguous runs of anchors, sharing `cap` demos by text length (largest remainder, ≥ 1 each). */
+function shareCaps(c: Ctx, runs: Anchor[][], cap: number): OutlinePart[] {
+  const out: OutlinePart[] = runs.map((anchors) => ({ pages: [...new Set(anchors.map((a) => a.page))], anchors, sections: [...new Set(anchors.map((a) => a.section))], cap: 0 }));
+  const sums = runs.map((r) => r.reduce((n, a) => n + anchorLen(c, a), 0));
+  const total = sums.reduce((n, x) => n + x, 0) || 1;
   const share = sums.map((x) => (cap * x) / total);
   out.forEach((p, i) => (p.cap = Math.max(1, Math.floor(share[i]))));
   let left = cap - out.reduce((n, p) => n + p.cap, 0);
@@ -856,6 +865,62 @@ export function outlineParts(c: Ctx, keep: Ctx["unit"]["anchors"]): OutlinePart[
     left--;
   }
   return out;
+}
+
+// --- Direct planning (YAGAMI_DIRECT=on): short units skip the outline --------------------
+// Each group of sections goes straight to its demos in one call (scripts/demos/direct.ts).
+
+/** Direct planning is opt-in until benchmarked (YAGAMI_DIRECT=on); never with the legacy planner. */
+/**
+ * Direct planning (no outline call) for short units — on by default (benchmarked: 3-page excerpt
+ * 18.6 s / $0.17, 6-page csapp 30.3 s / $0.21, all demos first try). YAGAMI_DIRECT=off opts out.
+ */
+export function directEnabled(): boolean {
+  return process.env.YAGAMI_DIRECT !== "off" && !legacyPlanner();
+}
+
+/** Longest unit (pages) planned directly (YAGAMI_DIRECT_MAX_PAGES, default 8). */
+export function directMaxPages(): number {
+  const n = Number(process.env.YAGAMI_DIRECT_MAX_PAGES ?? 8);
+  return Number.isFinite(n) && n > 0 ? n : 8;
+}
+
+/** This unit is planned directly (enabled, and short enough). */
+export function useDirect(book: BookConfig, unitId: string): boolean {
+  if (!directEnabled()) return false;
+  const u = book.units.find((x) => x.id === unitId);
+  return !!u && u.pages[1] - u.pages[0] + 1 <= directMaxPages();
+}
+
+/** At most this many groups per unit in direct mode (a group's reply is sequential; groups run in parallel). */
+const DIRECT_MAX_GROUPS = 4;
+/** A paragraph-split group holds at least this much text. */
+const DIRECT_MIN_GROUP_CHARS = 1500;
+
+/**
+ * Groups for direct planning: the outline's section-balanced parts when the unit has them;
+ * otherwise (one section, or no detected sections) a balanced split at paragraph boundaries
+ * into up to 4 groups of at least ~1.5k characters, about two demos each. A group's reply
+ * writes its demos one after another, so smaller groups finish sooner.
+ */
+export function directParts(c: Ctx, keep: Anchor[]): OutlinePart[] {
+  const parts = outlineParts(c, keep);
+  if (parts.length > 1) return parts;
+  const cap = parts[0].cap;
+  const w = keep.map((a) => anchorLen(c, a));
+  const total = w.reduce((n, x) => n + x, 0);
+  // Any non-heading anchor with text counts (a unit without detected sections, like an excerpt,
+  // has its paragraphs filed as "other").
+  const content = (a: Anchor) => a.kind !== "heading" && (c.text.text[a.id] ?? "").trim().length > 0;
+  const k = Math.min(DIRECT_MAX_GROUPS, Math.ceil(cap / 2), Math.floor(total / DIRECT_MIN_GROUP_CHARS));
+  for (let g = k; g >= 2; g--) {
+    const starts = partition(w, g, (i) => i > 0 && keep[i - 1].kind !== "heading");
+    if (!starts) continue;
+    const bounds = [...starts, keep.length];
+    const runs = starts.map((s, j) => keep.slice(s, bounds[j + 1]));
+    if (runs.every((r) => r.some(content))) return shareCaps(c, runs, cap);
+  }
+  return parts;
 }
 
 /**

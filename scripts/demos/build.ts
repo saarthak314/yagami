@@ -111,6 +111,11 @@ const systemCache = new Map<Domain, Anthropic.Beta.BetaTextBlockParam[]>();
 /** Allowed import specifiers for a generated demo (src/demos/<slug>/<unit>/X.tsx). */
 export const ALLOWED_IMPORTS = ["react", "../../../demo/kit", "../../../types"];
 
+/** The builder's cached system prompt (direct planning puts it first in its own prompt, unchanged). */
+export function builderSystem(book: BookConfig): Anthropic.Beta.BetaTextBlockParam[] {
+  return systemPrompt(book);
+}
+
 function systemPrompt(book: BookConfig): Anthropic.Beta.BetaTextBlockParam[] {
   const cached = systemCache.get(book.domain);
   if (cached) return cached;
@@ -510,6 +515,11 @@ export interface Generated {
 export interface GenerateOpts extends BuildOpts {
   /** false: validate the spec but don't put it into plan.json (a race candidate; the winner is accepted later). */
   accept?: boolean;
+  /**
+   * The first reply, already written (direct planning writes spec + code for several demos in one
+   * call): used instead of asking the model, as if it were the conversation's first answer.
+   */
+  prefill?: string;
 }
 
 export async function generateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, others: OutlineDemo[], gopts: GenerateOpts = {}): Promise<Generated> {
@@ -520,10 +530,11 @@ export async function generateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, 
   const images = await bookImages(c, { brief: `${o.idea} ${o.beats.map((b) => b.focus).join(" ")}`, beats: o.beats.map((b) => ({ anchor: b.anchor, preset: "", caption: "" })) });
   const messages: Anthropic.Beta.BetaMessageParam[] = [outlineMessage(c, o, others, images)];
   const effort = gopts.effort ?? buildEffort();
-  await warmBuilder(book, effort);
   let simplified = false;
   let turnEffort = effort;
   const ask = async (label: string): Promise<{ spec?: unknown; code?: string }> => {
+    // Warm only when a real turn is needed (a prefilled first reply may need none).
+    await warmBuilder(book, turnEffort);
     const r = await builderTurn(book, turnEffort, `${label}:${t}:${o.id}`, messages, gopts.signal);
     if (!r) {
       // Too big: ask once for a smaller version instead of continuing a giant reply. Measured: a capped
@@ -540,7 +551,11 @@ export async function generateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, 
     return splitReply(textOf(r.message));
   };
 
-  let reply = await ask("build");
+  let reply: { spec?: unknown; code?: string };
+  if (gopts.prefill) {
+    messages.push({ role: "assistant", content: gopts.prefill });
+    reply = splitReply(gopts.prefill);
+  } else reply = await ask("build");
   if (reply.spec === undefined || !reply.code) {
     messages.push({ role: "user", content: "Reply with exactly two fenced blocks: ```json with the DemoSpec, then ```tsx with the complete file." });
     reply = await ask("build");

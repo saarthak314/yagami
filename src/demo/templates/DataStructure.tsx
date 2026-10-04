@@ -3,7 +3,8 @@
 // the step explained, the operation's pseudocode highlighted and counters as readouts.
 
 import { useMemo, useRef } from "react";
-import { Stage, draw, theme } from "../kit";
+import { draw, theme } from "../kit";
+import { Stage } from "./stage";
 import { compile, compileField, type Env } from "./expr";
 import type { DataStructureConfig, Structure, StructureOp } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, opt, paramEnv, readoutValues, stepIndex, textWidth, val, type TemplateProps } from "./runtime";

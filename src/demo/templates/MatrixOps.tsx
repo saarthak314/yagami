@@ -1,7 +1,8 @@
 // matrix-ops: seeded matrices through a pipeline of operations, drawn as labelled heatmaps.
 
 import { useMemo } from "react";
-import { Stage, diverging, draw, matmul, randn, rng, sequential, theme, transpose } from "../kit";
+import { diverging, draw, matmul, randn, rng, sequential, theme, transpose } from "../kit";
+import { Stage } from "./stage";
 import { compile, num, type Compiled, type Env, type Value } from "./expr";
 import type { MatrixOpsConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, fmtValue, opt, paramEnv, readoutValues, textWidth, val, type TemplateProps } from "./runtime";

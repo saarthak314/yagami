@@ -2,7 +2,8 @@
 // sums approaching a limit, and an optional table of the first iterates (e.g. Euler steps).
 
 import { useMemo, useRef } from "react";
-import { Stage, draw, theme } from "../kit";
+import { draw, theme } from "../kit";
+import { Stage } from "./stage";
 import { compile, compileField, type Env } from "./expr";
 import type { SequenceConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, extent, fmtValue, opt, paramEnv, plotFrame, readoutValues, stepIndex, textWidth, val, type TemplateProps } from "./runtime";

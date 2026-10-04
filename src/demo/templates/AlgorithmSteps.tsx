@@ -2,7 +2,8 @@
 // or a small graph — with the code line being executed and counters as readouts.
 
 import { useMemo } from "react";
-import { Stage, draw, rng, theme, useSim } from "../kit";
+import { draw, rng, theme, useSim } from "../kit";
+import { Stage } from "./stage";
 import type { Algorithm, AlgorithmStepsConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, opt, paramEnv, readoutValues, textWidth, val, type TemplateProps } from "./runtime";
 import { LABEL_FONT } from "./ui";

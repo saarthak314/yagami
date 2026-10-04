@@ -2,7 +2,7 @@
 // Pure TypeScript (no DOM/React) so the Node pipeline can import it through catalog.ts.
 
 import type { DemoSpec } from "../../types";
-import { BUILTIN_FUNCTIONS, checkExpr } from "./expr";
+import { BUILTIN_FUNCTIONS, checkExpr, evalNum, tryCompile, type Env } from "./expr";
 
 /** A number, or an expression string over params and the template's variables. */
 export type Num = number | string;
@@ -802,6 +802,51 @@ export interface AttentionHeadsConfig extends Common {
   focus?: Num;
   view?: "heatmaps" | "arcs";
 }
+
+// --- Deterministic derived values (shared by the components and by validation) -------------------
+// Values a template derives from its config without randomness or time; validation evaluates them at
+// each beat's params so a spec's `expect` can be checked before anything renders.
+
+/** An integer config field (expression or number), clamped like the component clamps it. */
+function staticInt(f: Num | undefined, env: Env, d: number, lo: number, hi: number): number {
+  const c = f === undefined ? undefined : typeof f === "number" ? f : tryCompile(f);
+  const x = c === undefined || typeof c === "string" ? d : evalNum(c, env);
+  return Math.round(Math.max(lo, Math.min(hi, Number.isFinite(x) ? x : d)));
+}
+
+/** attention-heads: sizes and operation counts (the toy model keeps dModel ≤ 64, heads ≤ 8). */
+export function attentionHeadsStatic(config: AttentionHeadsConfig, env: Env) {
+  const tokens = (config.tokens ?? []).slice(0, 10);
+  const keys = config.memory?.length ? config.memory.slice(0, 10) : tokens;
+  const n = tokens.length;
+  const m = keys.length;
+  const dModel = staticInt(config.dModel, env, 8, 2, 64);
+  const h = Math.min(staticInt(config.heads, env, 2, 1, 8), dModel);
+  const dk = Math.max(1, Math.floor(dModel / h));
+  return { n, m, h, dk, dModel, projOps: 2 * n * dModel * dModel + 2 * m * dModel * dModel, scoreOps: h * n * m * dk, params: 4 * dModel * dModel };
+}
+
+/** layer-stack: sizes and parameter counts (dModel ≤ 64, dff ≤ 256, layers ≤ 8, heads ≤ 8). */
+export function layerStackStatic(config: LayerStackConfig, env: Env) {
+  const n = (config.tokens ?? []).slice(0, 10).length;
+  const d = staticInt(config.dModel, env, 16, 4, 64);
+  const dff = staticInt(config.dff, env, 4 * d, 4, 256);
+  const L = staticInt(config.layers, env, 1, 1, 8);
+  const h = Math.min(staticInt(config.heads, env, 2, 1, 8), d);
+  const dk = Math.max(1, Math.floor(d / h));
+  const subs: Sublayer[] = config.sublayers?.length ? config.sublayers : ["attention", "ffn"];
+  const perLayer = subs.reduce((a, sub) => a + (sub === "ffn" ? 2 * d * dff + dff + d : 4 * d * d), 0);
+  return { n, d, dff, L, h, dk, subs, perLayer, vars: { n, dModel: d, dff, dk, layers: L, params: perLayer, paramsTotal: perLayer * L } };
+}
+
+/** Per template: derived values readouts may use, computable at validation time. */
+export const STATIC_VARS: Record<string, (config: never, env: Env) => Env> = {
+  "attention-heads": (config: AttentionHeadsConfig, env: Env) => {
+    const v = attentionHeadsStatic(config, env);
+    return { n: v.n, m: v.m, h: v.h, dk: v.dk, dModel: v.dModel, projOps: v.projOps, scoreOps: v.scoreOps, params: v.params };
+  },
+  "layer-stack": (config: LayerStackConfig, env: Env) => layerStackStatic(config, env).vars,
+};
 
 export type Sublayer = "attention" | "cross" | "ffn";
 export interface LayerStackConfig extends Common {

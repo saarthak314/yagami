@@ -1,7 +1,8 @@
 // vector-diagram: 2-D vectors from expressions, with sums, an angle arc and a projection.
 
 import { useMemo } from "react";
-import { Stage, draw, theme, useSim } from "../kit";
+import { draw, theme, useSim } from "../kit";
+import { Stage } from "./stage";
 import { compile, num, type Compiled, type Env, type Value } from "./expr";
 import type { VectorDiagramConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, opt, paramEnv, readoutValues, spread, textWidth, val, type TemplateProps } from "./runtime";

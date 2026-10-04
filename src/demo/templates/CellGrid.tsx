@@ -3,7 +3,8 @@
 // filled — with pointers, field brackets and a one-line message.
 
 import { useMemo, useRef } from "react";
-import { Stage, draw, theme } from "../kit";
+import { draw, theme } from "../kit";
+import { Stage } from "./stage";
 import { compile, compileField, num, type Compiled, type Env, type Value } from "./expr";
 import type { CellGridConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, opt, paramEnv, readoutValues, stepIndex, textWidth, val, type TemplateProps } from "./runtime";

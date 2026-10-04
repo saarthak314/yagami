@@ -52,6 +52,11 @@ const TEMPLATE_MAX_TOKENS = 6000;
 
 let systemText: Promise<Anthropic.Beta.BetaTextBlockParam[]> | null = null;
 
+/** The template prompt (direct planning includes it after the builder's, unchanged). */
+export function templateSystem(): Promise<Anthropic.Beta.BetaTextBlockParam[]> {
+  return systemPrompt();
+}
+
 /** Stable (cached) system prompt for writing template specs: the contract + every template's config doc. */
 async function systemPrompt(): Promise<Anthropic.Beta.BetaTextBlockParam[]> {
   systemText ??= (async () => {
@@ -186,7 +191,7 @@ export interface TemplateGenerated {
 }
 
 /** Outline item → spec + template config (one Sonnet conversation, up to two repair turns). */
-export async function generateTemplateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, others: OutlineDemo[]): Promise<TemplateGenerated> {
+export async function generateTemplateDemo(c: Ctx, o: OutlineDemo, plan: PlanAssembler, others: OutlineDemo[], topts: { prefill?: string } = {}): Promise<TemplateGenerated> {
   const book = c.book;
   const t = tag(book.slug, c.unit.unit);
   const templateId = o.template!;
@@ -194,18 +199,29 @@ export async function generateTemplateDemo(c: Ctx, o: OutlineDemo, plan: PlanAss
   const images = await bookImages(c, { brief: `${o.idea} ${o.beats.map((b) => b.focus).join(" ")}`, beats: o.beats.map((b) => ({ anchor: b.anchor, preset: "", caption: "" })) });
   const messages: Anthropic.Beta.BetaMessageParam[] = [firstMessage(c, o, others, images)];
   const effort = templateEffort();
-  await warmTemplates(book, effort);
   let result: { spec?: DemoSpec; errors: string[] } = { errors: [] };
+  const correction = (errors: string[]) =>
+    messages.push({ role: "user", content: `The spec/config needs corrections:\n${errors.map((e) => `- ${e}`).join("\n")}\n\nReply with the complete corrected JSON in one \`\`\`json block (same ids).` });
+  // A prefilled first reply (direct planning) counts as the first attempt.
+  let attempt = 0;
+  if (topts.prefill) {
+    messages.push({ role: "assistant", content: topts.prefill });
+    result = await checkReply(jsonOf(topts.prefill), o, templateId, plan);
+    attempt = 1;
+    if (result.errors.length) {
+      log(`template ${t} ${o.id}: ${result.errors.length} problem(s): ${result.errors.slice(0, 2).join("; ")}`);
+      correction(result.errors);
+    }
+  } else await warmTemplates(book, effort);
   // Two repair turns: falling back to code is far slower and costlier than another short config turn.
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (; attempt < 3 && (attempt === 0 || result.errors.length); attempt++) {
     const r = await turn(book, effort, `template:${t}:${o.id}`, messages);
     if (!r) return { ok: false, fallback: true, why: "the template config reply was cut off" };
     messages.push({ role: "assistant", content: r.message.content });
     result = await checkReply(jsonOf(textOf(r.message)), o, templateId, plan);
     if (!result.errors.length) break;
     log(`template ${t} ${o.id}: ${result.errors.length} problem(s): ${result.errors.slice(0, 2).join("; ")}`);
-    if (attempt < 2)
-      messages.push({ role: "user", content: `The spec/config needs corrections:\n${result.errors.map((e) => `- ${e}`).join("\n")}\n\nReply with the complete corrected JSON in one \`\`\`json block (same ids).` });
+    if (attempt < 2) correction(result.errors);
   }
   if (result.errors.length || !result.spec) {
     log(`template ${t} ${o.id}: no valid config; generating it as code instead`);

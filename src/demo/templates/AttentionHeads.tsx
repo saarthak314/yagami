@@ -3,9 +3,10 @@
 // temperature and cross-attention to a separate memory are config switches.
 
 import { useMemo } from "react";
-import { Stage, draw, matmul, randMatrix, rng, sequential, theme, transpose } from "../kit";
+import { draw, matmul, randMatrix, rng, sequential, theme, transpose } from "../kit";
+import { Stage } from "./stage";
 import { num, type Compiled, type Env, type Value } from "./expr";
-import type { AttentionHeadsConfig } from "./configs";
+import { attentionHeadsStatic, type AttentionHeadsConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, opt, paramEnv, readoutValues, textWidth, val, type TemplateProps } from "./runtime";
 import { LABEL_FONT } from "./ui";
 
@@ -56,11 +57,9 @@ export default function AttentionHeads({ config, params, playing, resetKey, widt
     const tokens = config.tokens.slice(0, 10);
     const keys = config.memory?.length ? config.memory.slice(0, 10) : tokens;
     const cross = !!config.memory?.length;
-    const n = tokens.length;
-    const m = keys.length;
-    const dModel = int(c.dModel, 8, 2, 64);
-    const h = Math.min(int(c.heads, 2, 1, 8), dModel);
-    const dk = Math.max(1, Math.floor(dModel / h));
+    // Sizes come from the same function validation uses (so a spec's expectations match what renders).
+    const st = attentionHeadsStatic(config, env);
+    const { n, m, dModel, h, dk } = st;
     const scaled = flag(c.scale, true);
     const causal = flag(c.causal, false) && !cross;
     const tempRaw = c.temperature !== undefined ? val(c.temperature, env) : 1;
@@ -118,9 +117,9 @@ export default function AttentionHeads({ config, params, playing, resetKey, widt
       diversity: pairs ? dist / pairs : 0,
       rawVar,
       scoreVar,
-      projOps: 2 * n * dModel * dModel + 2 * m * dModel * dModel,
-      scoreOps: h * n * m * dk,
-      params: 4 * dModel * dModel,
+      projOps: st.projOps,
+      scoreOps: st.scoreOps,
+      params: st.params,
     };
     return { tokens, keys, n, m, h, dk, heads, focus, causal, cross, scaled, vars };
   }, [c, paramsKey, config.tokens, config.memory, config.seed]); // params enter through paramsKey

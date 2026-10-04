@@ -1,7 +1,8 @@
 // ode-sim: state variables integrated with RK4 from expression derivatives; a scene and/or time plots.
 
 import { useMemo } from "react";
-import { Stage, axes, draw, rk4, scale, theme, useSim } from "../kit";
+import { axes, draw, rk4, scale, theme, useSim } from "../kit";
+import { Stage } from "./stage";
 import { compile, type Compiled, type Env } from "./expr";
 import type { Color, OdeSimConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, fmtTick, niceTicks, opt, paramEnv, readoutValues, spread, textWidth, val, type TemplateProps } from "./runtime";

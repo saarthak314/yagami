@@ -1,7 +1,8 @@
 // table-bars: a few cases compared by formulas — a small table of computed columns and bars for one column.
 
 import { useMemo } from "react";
-import { Stage, draw, theme } from "../kit";
+import { draw, theme } from "../kit";
+import { Stage } from "./stage";
 import { compile, num, type Env, type Value } from "./expr";
 import type { TableBarsConfig } from "./configs";
 import { applyDefs, compileDefs, compileReadouts, fmtValue, opt, paramEnv, readoutValues, textWidth, val, type TemplateProps } from "./runtime";
