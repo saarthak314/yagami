@@ -179,7 +179,25 @@ function modelParams(model: Model, effort: Effort, format?: ReturnType<typeof be
 /** Sonnet's typical output speed, for estimating the tokens of a stream aborted mid-way. */
 const EST_TOKENS_PER_SECOND = 150;
 
+/**
+ * Waits before re-sending a request whose connection failed. The SDK's own retries (maxRetries) cover
+ * a few seconds; a network drop of a minute or two used to fail whole books (every stage at once).
+ */
+const RECONNECT_WAITS_MS = [10_000, 30_000, 60_000];
+
 async function run(opts: CallOpts, format?: ReturnType<typeof betaZodOutputFormat>) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await runOnce(opts, format);
+    } catch (e) {
+      const wait = RECONNECT_WAITS_MS[attempt];
+      if (!(e instanceof Anthropic.APIConnectionError) || wait === undefined || opts.signal?.aborted) throw e;
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
+async function runOnce(opts: CallOpts, format?: ReturnType<typeof betaZodOutputFormat>) {
   if (opts.signal?.aborted) throw new AbortedError(`${opts.label}: aborted before it started`);
   const t0 = Date.now();
   const stream = client.beta.messages.stream({

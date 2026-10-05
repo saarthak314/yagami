@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { BookConfig, DemoSpec, Domain } from "../src/types";
 import { loadBook, unitJsonPath, unitOf } from "./books";
-import { onCost, pool } from "./lib/claude";
+import { onCost, pool, roleModel } from "./lib/claude";
 import type { Emit, Stage } from "./lib/events";
 import { Limit } from "./lib/limit";
 import { emit, setEmit, withEmit } from "./lib/report";
@@ -586,8 +586,8 @@ async function verifyTemplate(
   const checked: CheckedOpts = {
     rounds: opts.rounds ?? 2,
     review: !skipsReview(spec),
-    fix: async (notes, check, _from, round) => {
-      const next = await reviseTemplate(c, current, notes.map((n) => `- ${n}`).join("\n"), check.sheet || null, { save, round });
+    fix: async (notes, check, from, round) => {
+      const next = await reviseTemplate(c, current, notes.map((n) => `- ${n}`).join("\n"), check.sheet || null, { save, round, ...(from === "model" ? { effort: roleModel("build").effort } : {}) });
       if (next) current = next;
       return next;
     },

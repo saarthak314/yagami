@@ -18,9 +18,10 @@ import { callJson, pool, roleModel } from "../lib/claude";
 import { Limit } from "../lib/limit";
 import { emit } from "../lib/report";
 import type { BookConfig, DemoSpec, Expectation, ReadoutSpec } from "../../src/types";
-import { demoRegions, loadConvo, regionsBlock, runConvo, saveSpec, toFixTurn } from "./build";
+import { buildEffort, demoRegions, loadConvo, regionsBlock, runConvo, saveSpec, toFixTurn } from "./build";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
 import { domainOf } from "./domains";
+import { modelSource, quoted, reviewModel } from "./fidelity";
 import { staticAudit } from "./rules";
 
 const HOST = "127.0.0.1";
@@ -1004,11 +1005,13 @@ export async function reviewSheet(c: Ctx, demo: DemoSpec, check: CheckResult): P
 }
 
 /** Feedback for the builder from deterministic notes (and, after a review, its issues). */
-function checkFeedback(notes: string[], check: CheckResult, from: "checks" | "review"): Anthropic.Beta.BetaMessageParam {
+function checkFeedback(notes: string[], check: CheckResult, from: "checks" | "review" | "model"): Anthropic.Beta.BetaMessageParam {
   const lead =
     from === "checks"
       ? "The demo was rendered in a headless browser (560×760 viewport) and checked automatically. These problems were found:"
-      : "The demo was rendered in a headless browser and reviewed. The reviewer found:";
+      : from === "model"
+        ? "An expert compared the simulation with the paper. It does not implement the paper's model here (\"model:\" items; any others are from the automatic checks):"
+        : "The demo was rendered in a headless browser and reviewed. The reviewer found:";
   const content: Anthropic.Beta.BetaContentBlockParam[] = [{ type: "text", text: `${lead}\n\n${notes.map((n) => `- ${n}`).join("\n")}` }];
   if (notes.some(isExpectNote))
     content.push({
@@ -1017,6 +1020,8 @@ function checkFeedback(notes: string[], check: CheckResult, from: "checks" | "re
     });
   if (notes.some((n) => /\) changes nothing: /.test(n)))
     content.push({ type: "text", text: 'A control that changes nothing: wire it into the code, or — if the demo doesn\'t need it — remove it from the spec with a ```json block {"drop": ["<control id>"]} (its preset and beat values go with it).' });
+  if (from === "model")
+    content.push({ type: "text", text: "Make the simulation compute what the paper says (its equations, rules, steps, scenario and numbers), then make sure every caption still describes what the stage shows; correct captions with a ```json {\"beats\": [...]} block if needed (one entry per beat, {} keeps one)." });
   if (from === "review")
     content.push({
       type: "text",
@@ -1070,7 +1075,7 @@ export interface CheckedOpts {
    * Custom fix step instead of the code conversation (template demos edit their config):
    * returns the updated spec, or null when nothing usable came back.
    */
-  fix?: (notes: string[], check: CheckResult, from: "checks" | "review", round: number) => Promise<DemoSpec | null>;
+  fix?: (notes: string[], check: CheckResult, from: "checks" | "review" | "model", round: number) => Promise<DemoSpec | null>;
 }
 
 /**
@@ -1086,6 +1091,20 @@ export function setFlag(slug: string, unit: string, demo: DemoSpec, reason: stri
   else delete next.flagged;
   saveSpec(slug, unit, next);
   return next;
+}
+
+/**
+ * A model review carried over to a later version (fixed for other reasons): keep only the issues whose
+ * quoted code is still in the source, so a flag never cites code that a fix already replaced.
+ */
+function stillQuoted(c: Ctx, demo: DemoSpec, m: { pass: boolean; issues: string[] }): { pass: boolean; issues: string[] } {
+  if (m.pass) return m;
+  const src = modelSource(c, demo) ?? "";
+  const issues = m.issues.filter((i) => {
+    const q = /; code: `(.*)`\)$/.exec(i)?.[1];
+    return !q || quoted(src, q.replace(/…$/, ""));
+  });
+  return { pass: issues.length === 0, issues };
 }
 
 /** The first failing issue of a result, for `flagged`. */
@@ -1108,6 +1127,13 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
   };
   let reviewFixes = 0;
   const reviews = new Map<string, { pass: boolean; issues: string[] }>();
+  // Model fidelity (code vs the paper), reviewed alongside the checks: once, and again only after its
+  // one fix. A model failure that survives the fix flags the demo.
+  const models = new Map<string, { pass: boolean; issues: string[] }>();
+  let modelLast: { pass: boolean; issues: string[] } | null = null;
+  let modelFixes = 0;
+  /** The next version comes from a model fix: review the model again (other fixes don't touch it). */
+  let modelRecheck = false;
   let round = 0;
   let results: BeatResult[] = [];
   let lastScore = -1;
@@ -1125,7 +1151,55 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
     for (; ; round++) {
       emit({ type: "demo", unit, id: demo.id, phase: "verifying", round, beats: demo.beats.length });
       const given = round === 0 ? opts.initial : undefined;
-      const check = given ? given.check : await checkDemo(env, c, demo, outDir);
+      const vkey = versionKey(demo);
+      const wantModel = opts.review !== false && !models.has(vkey) && (models.size === 0 || modelRecheck);
+      if (wantModel) modelRecheck = false;
+      const checkP = given ? Promise.resolve(given.check) : checkDemo(env, c, demo, outDir);
+      // The visual review starts as soon as the checks pass, alongside the model review (which is slower).
+      const reviewP =
+        opts.review === false || reviews.has(vkey) || given?.review
+          ? Promise.resolve(null)
+          : checkP.then((ch) => (ch.ok ? reviewSheet(c, demo, ch) : null)).catch((e) => {
+              log(`verify ${t} ${demo.id}: review failed: ${(e as Error).message}`);
+              return null;
+            });
+      const [check, model]: [CheckResult, { pass: boolean; issues: string[] } | null] = await Promise.all([
+        checkP,
+        wantModel
+          ? reviewModel(c, demo, modelLast && !modelLast.pass ? modelLast.issues : undefined).catch((e) => {
+              log(`verify ${t} ${demo.id}: model review failed: ${(e as Error).message}`);
+              return { pass: true, issues: [] };
+            })
+          : Promise.resolve(models.get(vkey) ?? (modelLast && stillQuoted(c, demo, modelLast))),
+      ]);
+      const early = await reviewP;
+      if (early) reviews.set(vkey, early);
+      if (model) {
+        models.set(vkey, model);
+        modelLast = model;
+        if (wantModel) log(`verify ${t} ${demo.id}: round ${round}: model ${model.pass ? "faithful" : `not faithful (${model.issues.length})`}`);
+      }
+      if (model && !model.pass && modelFixes < 1 && round < rounds) {
+        // The model is wrong: fix that first (with any check notes); captions are judged on the fixed version.
+        modelFixes++;
+        modelRecheck = true;
+        const notes = [...model.issues, ...(check.ok ? (early && !early.pass ? early.issues : []) : check.notes)];
+        results = toResults(check, false, notes);
+        consider(check.ok ? 1.5 : 1 - Math.min(check.notes.length, 999) / 1000);
+        if (opts.fix) {
+          const next = await opts.fix(notes, check, "model", round + 1);
+          if (!next) break;
+          demo = next;
+          continue;
+        }
+        const convo = loadConvo(slug, unit, demo.id);
+        if (!convo) break;
+        // A wrong model is a real rewrite, not a small edit: builder effort (the build conversation continues, with its pages).
+        toFixTurn(convo, checkFeedback(notes, check, "model").content as Anthropic.Beta.BetaContentBlockParam[], buildEffort());
+        await runConvo(convo, 3, "revising", round + 1);
+        demo = convo.spec;
+        continue;
+      }
       // Last round, and the only problems left are expected values: a wrong expectation must not
       // sink a demo that is otherwise fine. Drop those expectations and let the review decide.
       if (!check.ok && round >= rounds && check.notes.length && check.notes.every(isExpectNote)) {
@@ -1170,6 +1244,12 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
       reviews.set(key, r);
       log(`verify ${t} ${demo.id}: round ${round}: checks pass, review ${r.pass ? "pass" : `fail (${r.issues.length})`}`);
       results = toResults(check, r.pass, r.issues);
+      if (r.pass && model && !model.pass) {
+        // Looks right but still doesn't compute the paper's model after its fix: flag it.
+        results = toResults(check, false, model.issues);
+        consider(2.5);
+        break;
+      }
       consider(r.pass ? 3 : 2);
       if (r.pass) {
         pass = true;

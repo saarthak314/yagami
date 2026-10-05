@@ -159,7 +159,8 @@ ${DEMO_RULES}
 - Style: minimal, on the dark stage (the canvas is transparent over #0a0a0a; don't paint a background). Use theme.fg for main objects, theme.muted for secondary lines, theme.faint or theme.grid for guides, and theme.accent (sparingly) for the one quantity the demo is about; theme.accent2 only for a contrasting second quantity. Symbols with \`draw.text(..., { kind: "symbol" })\`, annotations with kind "label", numbers with kind "mono". No gradients, glows, emoji or decoration. Any source code shown on the stage goes through \`draw.code\`, never plain draw.text. The reader has light and dark site themes and \`theme\` follows them: use only theme.* colours, \`sequential\`/\`diverging\` ramps and \`contrastText(fill)\` for text on filled cells; never write hex or rgb() colour literals, and read theme values at draw time (not in module-level constants).
 ${d.builder}
 - Correctness: equations, units, signs and directions must match the spec and the text. Readouts must be computed from the same state that is drawn.
-- Compact: one idea, aim for ≤ ~200 lines. Put shared drawing in small helper functions instead of repeating blocks per preset or mode; no dead code, no long comments.
+- Model first: start the file with a short \`// Model:\` comment (≤ 6 lines) stating the paper's equations, update rules or algorithm steps and the scenario you implement (its example, constants, table rows), with the anchor ids they come from and which params feed which symbols. Then implement exactly that model; simplify sizes or time scales only in ways that keep the paper's point. The code is checked against the paper.
+- Compact: one idea, aim for ≤ ~200 lines. Put shared drawing in small helper functions instead of repeating blocks per preset or mode; no dead code, no long comments (beyond the model comment).
 - Deterministic: no Math.random (use the kit's seeded \`rng\`), no Date.
 - TypeScript strict mode with noUnusedLocals and noUnusedParameters: no unused variables, parameters or imports; no \`any\`.
 - Unless a request says otherwise, reply with only one \`\`\`tsx fenced block containing the complete file.
@@ -309,8 +310,7 @@ const FENCE = "```";
  * the file as it stands and the request — and reads the system prompt from the cache.
  * Conversations already at fix effort (e.g. a low-effort race candidate) just continue.
  */
-export function toFixTurn(convo: Convo, request: string | Anthropic.Beta.BetaContentBlockParam[]): void {
-  const effort = fixEffort();
+export function toFixTurn(convo: Convo, request: string | Anthropic.Beta.BetaContentBlockParam[], effort: Effort = fixEffort()): void {
   const asBlocks = (r: string | Anthropic.Beta.BetaContentBlockParam[]): Anthropic.Beta.BetaContentBlockParam[] => (typeof r === "string" ? [{ type: "text", text: r }] : r);
   if ((convo.effort ?? "medium") === effort) {
     convo.messages.push({ role: "user", content: request });

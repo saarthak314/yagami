@@ -297,7 +297,7 @@ export async function reviseTemplate(
   spec: DemoSpec,
   notes: string,
   sheet: string | null,
-  opts: { save?: (spec: DemoSpec) => void; round?: number } = {},
+  opts: { save?: (spec: DemoSpec) => void; round?: number; effort?: Effort } = {},
 ): Promise<DemoSpec | null> {
   const slug = c.book.slug;
   const unit = c.unit.unit;
@@ -306,7 +306,7 @@ export async function reviseTemplate(
   // Config fixes run at fix effort (low). Effort is part of the cached prefix: a saved conversation
   // at another effort is not continued (that would re-bill it uncached) but restarted from the
   // current spec, reading the system prompt from the cache.
-  const effort = fixEffort();
+  const effort = opts.effort ?? fixEffort();
   void warmTemplates(c.book, effort);
   const saved = loadConvo(slug, unit, spec.id);
   const convo: Convo = saved && (saved.effort ?? "medium") === effort ? saved : { book: slug, unit, spec, messages: [], effort, kind: "template" };
