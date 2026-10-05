@@ -129,7 +129,7 @@ export function sanityGate(c: Ctx, keep: Anchor[], who = `plan ${tag(c.book.slug
 // --- Demo cap -----------------------------------------------------------------------------
 
 /** Most demos for any unit. */
-export const DEMO_CAP_MAX = 12;
+export const DEMO_CAP_MAX = 10;
 /** A page counts as substantive with at least this much plannable text (figures and tables count ~400 chars). */
 const SUBSTANTIVE_PAGE_CHARS = 900;
 /** A section counts as substantive with at least this much plannable text. */
@@ -137,8 +137,9 @@ const SUBSTANTIVE_SECTION_CHARS = 1500;
 
 /**
  * Most demos for a unit, from its substantive (plannable, text-bearing) pages and sections: the old
- * caps as a floor (≤ 3 pages: 5, ≤ 6: 6, else 7), scaling up with ~1 per 2 substantive pages or
- * ~0.7 per substantive section, at most DEMO_CAP_MAX.
+ * caps as a floor (≤ 3 pages: 5, ≤ 6: 6, else 7), scaling up with ~1 per 3 substantive pages or
+ * ~0.6 per substantive section, at most DEMO_CAP_MAX (10). Benchmarked: ~1 per 2 pages up to 12
+ * tripled the cost of long papers for demos that mostly repeated ideas.
  */
 export function demoCap(c: Ctx, keep: Anchor[]): number {
   const weight = (a: Anchor) => (a.kind === "heading" ? 0 : a.kind === "figure" || a.kind === "table" ? 400 : (c.text.text[a.id] ?? "").trim().length);
@@ -151,7 +152,7 @@ export function demoCap(c: Ctx, keep: Anchor[]): number {
   const subPages = [...perPage.values()].filter((n) => n >= SUBSTANTIVE_PAGE_CHARS).length;
   const subSections = [...perSection.values()].filter((n) => n >= SUBSTANTIVE_SECTION_CHARS).length;
   const base = subPages <= 3 ? 5 : subPages <= 6 ? 6 : 7;
-  return Math.min(DEMO_CAP_MAX, Math.max(base, Math.round(subPages / 2), Math.ceil(subSections * 0.7)));
+  return Math.min(DEMO_CAP_MAX, Math.max(base, Math.round(subPages / 3), Math.ceil(subSections * 0.6)));
 }
 
 // --- Stand-ins ------------------------------------------------------------------------------

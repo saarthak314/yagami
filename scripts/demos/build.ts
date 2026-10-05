@@ -9,13 +9,14 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { AbortedError, call, type Effort, fixEffort, pool, prewarm, roleModel, systemCacheControl, textOf } from "../lib/claude";
-import type { Anchor, BookConfig, Domain, DemoSpec, Expectation } from "../../src/types";
+import type { Anchor, BookConfig, Domain, DemoSpec, Expectation, Params } from "../../src/types";
 import { loadBook } from "../books";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, specSink, tag, writeJson } from "./common";
 import { emit } from "../lib/report";
 import { domainOf } from "./domains";
 import { DEMO_RULES } from "./rules";
 import type { OutlineDemo, PlanAssembler } from "./plan";
+import { tidyCaption } from "./plan";
 import { groundingRequest, isOcr, referencedRegions, type Region, regionCrop, regionsText, sourceNote } from "./quality";
 
 const run = promisify(execFile);
@@ -342,36 +343,74 @@ export function loadConvo(slug: string, unit: string, id: string): Convo | null 
 }
 
 /**
- * A fix reply may correct the spec's expectations (when the text supports the readout rather than
- * the expected value): a fenced ```json block `{ "expect": [...] }` with the full corrected list,
- * entries `{ beat | anchor, readout, value, tol? }`. Applied to the convo spec and plan.json.
+ * A fix reply may correct the spec instead of (or as well as) the code: a fenced ```json block with
+ * `"expect": [...]` (the full corrected list, entries `{ beat | anchor, readout, value, tol? }`) when
+ * the text supports the readout rather than the expected value, and/or `"beats": [...]` (one entry per
+ * beat, in order: `{ caption?, preset?, params? }`) when a caption claims what the stage doesn't show
+ * or a beat should start from another preset/params, and/or `"drop": ["<control id>"]` for controls
+ * the demo doesn't need. Applied to the convo spec and plan.json.
  * Returns true when a valid patch was applied.
  */
-export function applyExpectPatch(convo: Convo, text: string): boolean {
-  const m = [...text.matchAll(/```json\s*\n([\s\S]*?)\n```/g)].map((x) => x[1]).find((b) => /"expect"\s*:/.test(b));
+export function applySpecPatch(convo: Convo, text: string): boolean {
+  const m = [...text.matchAll(/```json\s*\n([\s\S]*?)\n```/g)].map((x) => x[1]).find((b) => /"(expect|beats|drop)"\s*:/.test(b));
   if (!m) return false;
-  let raw: unknown;
+  let patch: { expect?: unknown; beats?: unknown; drop?: unknown };
   try {
-    raw = (JSON.parse(m) as { expect?: unknown }).expect;
+    patch = JSON.parse(m) as { expect?: unknown; beats?: unknown; drop?: unknown };
   } catch {
     return false;
   }
-  if (!Array.isArray(raw)) return false;
   const spec = convo.spec;
-  const readouts = new Set(spec.readouts.map((r) => r.id));
-  const out: Expectation[] = [];
-  for (const e of raw as { beat?: unknown; anchor?: unknown; readout?: unknown; value?: unknown; tol?: unknown }[]) {
-    if (!e || typeof e !== "object") continue;
-    const beat = typeof e.anchor === "string" ? spec.beats.findIndex((b) => b.anchor === e.anchor) : typeof e.beat === "number" && Number.isInteger(e.beat) && e.beat >= 0 && e.beat < spec.beats.length ? e.beat : -1;
-    const value = typeof e.value === "number" ? e.value : typeof e.value === "string" ? Number(e.value.replace(/[,\s]/g, "")) : NaN;
-    if (beat < 0 || typeof e.readout !== "string" || !readouts.has(e.readout) || !Number.isFinite(value)) continue;
-    const tol = typeof e.tol === "number" && e.tol >= 0 && e.tol <= 1 ? e.tol : undefined;
-    out.push({ beat, readout: e.readout, value, ...(tol !== undefined ? { tol } : {}) });
+  const what: string[] = [];
+  if (Array.isArray(patch.expect)) {
+    const readouts = new Set(spec.readouts.map((r) => r.id));
+    const out: Expectation[] = [];
+    for (const e of patch.expect as { beat?: unknown; anchor?: unknown; readout?: unknown; value?: unknown; tol?: unknown }[]) {
+      if (!e || typeof e !== "object") continue;
+      const beat = typeof e.anchor === "string" ? spec.beats.findIndex((b) => b.anchor === e.anchor) : typeof e.beat === "number" && Number.isInteger(e.beat) && e.beat >= 0 && e.beat < spec.beats.length ? e.beat : -1;
+      const value = typeof e.value === "number" ? e.value : typeof e.value === "string" ? Number(e.value.replace(/[,\s]/g, "")) : NaN;
+      if (beat < 0 || typeof e.readout !== "string" || !readouts.has(e.readout) || !Number.isFinite(value)) continue;
+      const tol = typeof e.tol === "number" && e.tol >= 0 && e.tol <= 1 ? e.tol : undefined;
+      out.push({ beat, readout: e.readout, value, ...(tol !== undefined ? { tol } : {}) });
+    }
+    if (out.length) spec.expect = out;
+    else delete spec.expect;
+    what.push(`expectations (${out.length})`);
   }
-  if (out.length) spec.expect = out;
-  else delete spec.expect;
+  if (Array.isArray(patch.beats) && patch.beats.length === spec.beats.length) {
+    const presets = new Set(spec.presets.map((p) => p.id));
+    const keys = new Set([...spec.controls.map((c) => c.id), ...spec.presets.flatMap((p) => Object.keys(p.params))]);
+    let n = 0;
+    spec.beats = spec.beats.map((b, i) => {
+      const e = (patch.beats as unknown[])[i] as { caption?: unknown; preset?: unknown; params?: unknown } | null;
+      if (!e || typeof e !== "object") return b;
+      const next = { ...b };
+      if (typeof e.caption === "string" && e.caption.trim() && e.caption.trim() !== b.caption) next.caption = tidyCaption(e.caption.trim()).slice(0, 300);
+      if (typeof e.preset === "string" && presets.has(e.preset)) next.preset = e.preset;
+      if (e.params && typeof e.params === "object" && !Array.isArray(e.params)) {
+        const ps = Object.entries(e.params as Record<string, unknown>).filter(([k, v]) => keys.has(k) && (typeof v === "number" || typeof v === "boolean" || typeof v === "string"));
+        if (ps.length) next.params = Object.fromEntries(ps) as Params;
+        else delete next.params;
+      }
+      if (JSON.stringify(next) !== JSON.stringify(b)) n++;
+      return next;
+    });
+    what.push(`beats (${n} changed)`);
+  }
+  if (Array.isArray(patch.drop)) {
+    // Controls the demo doesn't need (the checks found they change nothing): removed with their values.
+    const drop = new Set((patch.drop as unknown[]).filter((x): x is string => typeof x === "string" && spec.controls.some((c) => c.id === x)));
+    if (drop.size) {
+      const keep = (ps: Params) => Object.fromEntries(Object.entries(ps).filter(([k]) => !drop.has(k)));
+      spec.controls = spec.controls.filter((c) => !drop.has(c.id));
+      spec.presets = spec.presets.map((pr) => ({ ...pr, params: keep(pr.params) }));
+      spec.beats = spec.beats.map((b) => (b.params ? { ...b, params: keep(b.params) } : b));
+      what.push(`dropped ${[...drop].join(", ")}`);
+    }
+  }
+  if (!what.length) return false;
   saveSpec(convo.book, convo.unit, spec);
-  log(`build ${tag(convo.book, convo.unit)} ${spec.id}: expectations corrected (${out.length})`);
+  log(`build ${tag(convo.book, convo.unit)} ${spec.id}: spec corrected: ${what.join(", ")}`);
   return true;
 }
 
@@ -429,11 +468,11 @@ export async function runConvo(
     const { message, text } = reply;
     convo.messages.push({ role: "assistant", content: message.content });
     const current = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-    const patched = editing && applyExpectPatch(convo, text);
+    const patched = editing && applySpecPatch(convo, text);
     const edited = current ? applyEdits(current, text) : null;
     const code = edited && "code" in edited ? edited.code : codeOf(text);
     if (code === null && patched && current) {
-      // Only the expectations were wrong: the file stays as it is.
+      // Only the spec was wrong (expectations, captions or beat setups): the file stays as it is.
       saveConvo(convo);
       return true;
     }

@@ -17,7 +17,13 @@ export const DEMO_RULES = `Robustness rules (the demo is stress-tested: every be
 - Publish every readout id on every frame via setReadouts, with finite values (format with fmt()); never NaN, Infinity, "undefined" or "null". Use "—" only when a readout truly doesn't apply in the current preset.
 - Keep every label inside the stage (≥ 16 px margin) and never let two labels overlap; put legends in their own row outside the plot area; size fonts and layout from width/height so it works from 480×300 to 1200×900.
 - Deterministic: no Math.random, Date or performance.now; seed randomness with rng(seed); animate only from Stage's onFrame (t, dt).
-- No DOM, timers or global state: no document/window access, setTimeout/setInterval/requestAnimationFrame, or module-level mutable variables.`;
+- No DOM, timers or global state: no document/window access, setTimeout/setInterval/requestAnimationFrame, or module-level mutable variables.
+
+Faithfulness rules (an expert compares every beat with the paper; these are the failures it found most):
+- A caption says what that beat's stage visibly does with its preset and params: the objects, the behaviour and the outcome the reader will see. Never claim a sweep, overshoot, fork, second leader or curve that the beat doesn't draw. A true fact from the paper that the stage doesn't show is not a caption.
+- The beat's preset must reach the captioned state: if a caption is about one moment of a process (a split vote, the entry at index 7, the resize), give that beat params that set the process up to show it and hold it, rather than a moment inside a long loop shared with other beats.
+- Use the paper's own example, method and numbers where it gives them (its machine table, its source, its scenario). Compared values come from one table and row, the one the paragraph discusses. Don't simplify away the point the paragraph makes.
+- Every control and every preset parameter changes the stage or a readout, and a select or label shows the value that is actually simulated.`;
 
 /** A risky pattern in demo code and what to tell the builder. Only near-zero-false-positive patterns belong here. */
 interface Pattern {

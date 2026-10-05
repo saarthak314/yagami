@@ -136,6 +136,41 @@ function clip(s: string, max: number): string {
   return (cut || s.slice(0, max)).replace(/[\s,;:–—-]+$/, "");
 }
 
+/**
+ * Caption text as the reader will render it (InlineMd): exclamation marks become full stops, but
+ * not factorials ("k!", "(n-k)!") or anything inside $math$; a "$" that starts a money amount
+ * ("$100 … $10") is escaped, so the two amounts don't render as one italic math run.
+ */
+export function tidyCaption(s: string): string {
+  // Money: an unescaped "$" before a digit whose would-be math run holds prose (or never closes).
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === "\\") {
+      out += ch + (s[i + 1] ?? "");
+      i++;
+      continue;
+    }
+    if (ch !== "$") {
+      out += ch;
+      continue;
+    }
+    let j = i + 1;
+    while (j < s.length && (s[j] !== "$" || s[j - 1] === "\\")) j++;
+    const run = s.slice(i + 1, j);
+    const prose = run.replace(/\\text\{[^}]*\}/g, "");
+    if (/^\d/.test(run) && (j >= s.length || /\s$/.test(run) || /[A-Za-z]{3,}\s+[A-Za-z]{3,}|[:;]\s|,\s[A-Za-z]{2}/.test(prose))) {
+      out += "\\$";
+      continue;
+    }
+    // Real math: copy it through untouched.
+    out += s.slice(i, Math.min(j + 1, s.length));
+    i = j;
+  }
+  // Exclamations outside math, after a word (not a factorial of a symbol, digit or bracket).
+  return out.replace(/(\$(?:\\.|[^$\\])*\$)|([A-Za-z]{2})!(?=\s|$)/g, (m, math, word) => (math ? m : `${word}.`));
+}
+
 /** A long caption keeps its leading whole sentences that fit; else it is clipped at a word. */
 function trimCaption(s: string, max: number): string {
   if (s.length <= max) return s;
@@ -212,7 +247,7 @@ export function fixDemo(d: DemoSpec, c: Ctx, state: PlanState, copied: CopyCheck
       b.params = Object.keys(out).length ? out : undefined;
       if (!b.params) delete b.params;
     }
-    b.caption = trimCaption(b.caption.replace(/!/g, ".").trim(), 260);
+    b.caption = trimCaption(tidyCaption(b.caption.trim()), 260);
     if (/\bAI\b/.test(b.caption)) errs.push(`beat at ${b.anchor}: caption must not mention AI`);
     if (b.caption.length < 10) errs.push(`beat at ${b.anchor}: caption too short`);
     if (copied.caption(b.caption)) errs.push(`beat at ${b.anchor}: caption copies a sentence from the text; write it in your own words`);

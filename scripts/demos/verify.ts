@@ -18,7 +18,7 @@ import { callJson, pool, roleModel } from "../lib/claude";
 import { Limit } from "../lib/limit";
 import { emit } from "../lib/report";
 import type { BookConfig, DemoSpec, Expectation, ReadoutSpec } from "../../src/types";
-import { loadConvo, runConvo, saveSpec, toFixTurn } from "./build";
+import { demoRegions, loadConvo, regionsBlock, runConvo, saveSpec, toFixTurn } from "./build";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
 import { domainOf } from "./domains";
 import { staticAudit } from "./rules";
@@ -245,6 +245,8 @@ export interface CheckShot {
   shapes?: ShapeBox[];
   /** The beat run on to ~6 s and ~16 s, so step-throughs show their later and final states. */
   later?: LaterSample[];
+  /** What the stage wrote, sampled every second from ~1 s to the last sample (only when it changed). */
+  timeline?: { t: number; text: string }[];
 }
 
 export interface CheckResult {
@@ -360,16 +362,35 @@ async function shootSettled(page: Page, env: VerifyEnv, c: Ctx, demo: DemoSpec, 
 
   // Run the beat on and sample its later states (step-throughs reach their key state late).
   const later: LaterSample[] = [];
+  // The stage's own words over time (step captions like "3/5 · …"): the reviewer sees states the
+  // three frames miss. Advancing in 1 s steps is the same deterministic run as one big step.
+  const timeline: { t: number; text: string }[] = [];
+  const note = (t: number, boxes: TextBox[]) => {
+    const text = stageWords(boxes);
+    if (text && timeline[timeline.length - 1]?.text !== text) timeline.push({ t, text });
+  };
+  note(SETTLE_MS / 1000, info.text);
   if (ready && hasStage) {
     let at = SETTLE_MS / 1000;
     for (const t of LATER_SAMPLES) {
-      try {
-        await page.evaluate((sec) => (globalThis as unknown as { __stageAdvance?: (s: number) => void }).__stageAdvance?.(sec), t - at);
-      } catch (e) {
-        errors.push(`runtime error while running on to t≈${t} s: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 160)}`);
-        break;
+      let failed = false;
+      while (at < t) {
+        const step = Math.min(1, t - at);
+        try {
+          const boxes = await page.evaluate((sec) => {
+            const w = globalThis as unknown as { __stageAdvance?: (s: number) => void; __stageText?: TextBox[] };
+            w.__stageAdvance?.(sec);
+            return w.__stageText ?? [];
+          }, step);
+          at += step;
+          note(Math.round(at), boxes);
+        } catch (e) {
+          errors.push(`runtime error while running on to t≈${t} s: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 160)}`);
+          failed = true;
+          break;
+        }
       }
-      at = t;
+      if (failed) break;
       await page.waitForTimeout(250); // the shell publishes readouts at 10 Hz
       const st = await stage.screenshot().catch(() => null);
       const file = path.join(outDir, `${demo.id}-${beat}-t${t}.png`);
@@ -383,7 +404,14 @@ async function shootSettled(page: Page, env: VerifyEnv, c: Ctx, demo: DemoSpec, 
       later.push({ t, readouts: await readNow(), shot: file, changedFrom1s: s2 && st ? await stageDiff(s2, st) : 0, text: got.text, shapes: got.shapes });
     }
   }
-  return { beat, anchor: demo.beats[beat].anchor, ready, errors: [...new Set(errors)], readouts, changed, ink, shot, text: info.text, textBefore, stage: info.stage, shapes, later };
+  return { beat, anchor: demo.beats[beat].anchor, ready, errors: [...new Set(errors)], readouts, changed, ink, shot, text: info.text, textBefore, stage: info.stage, shapes, later, timeline };
+}
+
+/** Stage text in reading order (top to bottom, left to right), as one line. */
+function stageWords(boxes: TextBox[]): string {
+  const words = [...boxes].sort((a, b) => Math.round(a.y / 8) - Math.round(b.y / 8) || a.x - b.x).map((b) => b.text.trim()).filter(Boolean);
+  const line = words.join(" · ");
+  return line.length > 400 ? line.slice(0, 399) + "…" : line;
 }
 
 const SUPER: Record<string, string> = { "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "⁻": "-", "⁺": "+" };
@@ -875,33 +903,90 @@ export async function verifyDemo(env: VerifyEnv, c: Ctx, demo: DemoSpec, rounds:
 // including one produced by a fix round — and a demo still failing after all rounds is
 // flagged in its spec (the reader says so) with the best version kept.
 
-const SheetReviewSchema = z.object({ pass: z.boolean(), issues: z.array(z.string()) });
+/**
+ * Each finding carries a severity and its evidence; only evidenced blockers fail a demo.
+ * Calibrated on 10 papers against an expert audit (work/qa/e2e/audit3): an unstructured reviewer
+ * flagged 65% of demos, but its flags barely tracked the demos that were really wrong. It failed
+ * demos for findings it called "acceptable" itself, for things it misread in small frames, for loop
+ * restarts and for its own recomputations, and it missed scenarios that weren't the paper's.
+ */
+const SheetReviewSchema = z.object({
+  issues: z.array(
+    z.object({
+      beat: z.number().nullable(),
+      severity: z.enum(["blocker", "minor"]),
+      kind: z.enum(["caption-vs-stage", "number", "paper", "other"]),
+      /** The claim that is wrong, quoted (caption, readout label, or the paper). */
+      claim: z.string(),
+      /** What contradicts it, quoted from the readouts, the stage text or the paper. */
+      evidence: z.string(),
+      text: z.string(),
+    }),
+  ),
+});
+
+type SheetIssue = z.infer<typeof SheetReviewSchema>["issues"][number];
+
+/** Words a reviewer uses when it doesn't really think something is wrong. */
+const HEDGE = /\b(this matches|which matches|so the caption is (correct|accurate|fine|right)|acceptable|is consistent|are consistent|not a (real )?(problem|blocker|issue)|no contradiction|please verify|may want to|could be clearer|downgrad\w*|arguabl\w*|minor|nitpick|technically correct|fine as is|seems? (fine|correct|ok))\b/i;
+
+/** Blockers that carry a quoted claim and contradicting evidence and don't hedge (the rest count as minor). */
+export function realBlockers(issues: SheetIssue[]): SheetIssue[] {
+  return issues.filter((i) => i.severity === "blocker" && i.claim.trim().length >= 6 && i.evidence.trim().length >= 6 && !HEDGE.test(`${i.text} ${i.evidence}`));
+}
 
 function sheetSystem(book: BookConfig): string {
   const d = domainOf(book.domain);
-  return `You review ${d.demoNoun}s that accompany "${book.title}". You get ONE contact sheet: one row per beat, each rendered after ~1 s, ~${LATER_SAMPLES.join(" s and ~")} s of running (caption, stage, controls and readouts), plus each beat's caption, the anchored paragraph and the readout values as text, and the demo brief.
+  return `You review ${d.demoNoun}s that accompany "${book.title}". For every beat you get: its caption, preset and params; the anchored paragraph (marked ">>>") with its neighbours; the readouts at ~1, ~${LATER_SAMPLES.join(" and ~")} s; the text the stage itself drew, sampled every second (step labels such as "3/5 · …" tell you which state it is in); and one image with the demo at ~1, ~${LATER_SAMPLES.join(" and ~")} s. Referenced tables come as text.
 
-Layout and numbers were already checked by a script: no runtime errors, no blank stage, no clipped or overlapping labels, readouts present and the values the text pins down are correct. Do not re-check those. Judge only what needs understanding:
-- does each beat's stage show what its caption and paragraph describe (the right objects, the right behaviour, the right trend when a control changes between beats)?
+A script already checked layout and numbers: no runtime errors, no blank stage, no clipped or overlapping labels, readouts present and the values the text pins down correct. Do not re-check those. Your job is what needs understanding:
+- does each beat show what its caption claims (the right objects, behaviour and outcome)?
+- is the scenario the paper's own (its example, its method, numbers from the right table/row), and does it make the paper's point?
 ${d.reviewChecks}
-- would a reader be misled by the picture?
 
-The images are small; do not fail for legibility or taste. Mid-animation values are partial; a step-through may reach its key state only in the later frames, so judge the end state there — and fail a beat whose caption describes something the frames never show. Check that numbers the caption states match the readouts. Default to pass; fail only when ${d.reviewer} would agree the demo is wrong or misleading. Issues (at most 4) must say which beat, what is wrong and what it should be. Reply as JSON { "pass": boolean, "issues": string[] }.`;
+How to read the evidence:
+- The frames are three snapshots of a running, often looping animation. A frame may land mid-step or on a restart. Use the stage-text timeline to see the states in between before saying the stage "never" shows something.
+- Read values from the readouts and stage text (exact) rather than from the images (small).
+- Do not recompute with parameters you assume. Use only the numbers in the params, readouts, stage text and the paper.
+
+Classify every finding:
+- "blocker": the demo would teach the reader something false. Examples: a stated number contradicts the paper or the readouts; the behaviour or outcome contradicts what the paragraph says; the caption's central claim is contradicted by what the stage shows (for example "both signatures valid" while the stage text says "invalid"), or no state in the timeline shows it; the scenario is not the paper's and changes its point (wrong table, wrong method, a different example that proves something else).
+- "minor": everything else. That includes a true statement from the paper that the stage doesn't draw, rounding, partial values mid-animation, wording, legibility, style, and anything you consider acceptable.
+A blocker must quote the claim ("claim": the caption's or label's words, or the paper's) and the evidence that contradicts it ("evidence": the readout, stage text or paper words, with the time if it matters). If you can't quote both, it is minor. At most 4 blockers. "text" says what is wrong and what it should be. Reply as JSON { "issues": [{ "beat": number | null, "severity": "blocker" | "minor", "kind": "caption-vs-stage" | "number" | "paper" | "other", "claim": string, "evidence": string, "text": string }] }. Use an empty list when the demo is right.`;
 }
 
-/** One model review of a demo that passed the deterministic checks (one contact-sheet image). */
+/** One row per beat, its frames at ~1 s and the later samples, at a scale the reviewer can read. */
+async function beatStrip(s: CheckShot, file: string, scale = 0.6): Promise<string | null> {
+  const cells = [s.shot, ...(s.later ?? []).map((l) => l.shot)].filter((f) => fs.existsSync(f));
+  if (!cells.length) return null;
+  const tw = Math.round(VIEWPORT.width * scale);
+  const th = Math.round(VIEWPORT.height * scale);
+  const gap = 8;
+  const tiles = await Promise.all(cells.map(async (f, i) => ({ input: await sharp(f).resize(tw, th, { fit: "contain", background: "#0a0a0a" }).png().toBuffer(), left: i * (tw + gap), top: 0 })));
+  await sharp({ create: { width: cells.length * tw + (cells.length - 1) * gap, height: th, channels: 3, background: "#000000" } })
+    .composite(tiles)
+    .png()
+    .toFile(file);
+  return file;
+}
+
+/** One model review of a demo that passed the deterministic checks. */
 export async function reviewSheet(c: Ctx, demo: DemoSpec, check: CheckResult): Promise<{ pass: boolean; issues: string[] }> {
+  const regions = demoRegions(c, [demo.brief, ...demo.beats.map((b) => b.caption)], demo.beats.map((b) => b.anchor));
   const content: Anthropic.Beta.BetaContentBlockParam[] = [
-    { type: "text", text: `Demo "${demo.title}" (${demo.id}).\n\nBrief:\n${demo.brief}\n\nControls: ${JSON.stringify(demo.controls)}\nReadouts: ${JSON.stringify(demo.readouts)}` },
+    { type: "text", text: `Demo "${demo.title}" (${demo.id}).\n\nBrief:\n${demo.brief}\n\nControls: ${JSON.stringify(demo.controls)}\nReadouts: ${JSON.stringify(demo.readouts)}${regionsBlock(regions)}` },
   ];
+  const times = ["~1 s", ...LATER_SAMPLES.map((t) => `~${t} s`)];
   for (const s of check.shots) {
     const b = demo.beats[s.beat];
+    const timeline = (s.timeline ?? []).map((x) => `  ${x.t} s: ${x.text}`).join("\n");
     content.push({
       type: "text",
-      text: `\n## Beat ${s.beat}\nPreset: ${b.preset}${b.params ? `, params ${JSON.stringify(b.params)}` : ""}\nCaption: ${b.caption}\nParagraph (${textSourceNote(c.book).name}):\n${anchorContext(c, b.anchor, 0, 0)}\nReadouts at ~1 s: ${JSON.stringify(s.readouts)}${(s.later ?? []).map((l) => `\nReadouts at ~${l.t} s: ${JSON.stringify(l.readouts)}`).join("")}\nStage motion over 0.4 s: ${(s.changed * 100).toFixed(1)}% of pixels${(s.later ?? []).map((l) => `; ~${l.t} s frame differs from ~1 s by ${(l.changedFrom1s * 100).toFixed(1)}%`).join("")}`,
+      text: `\n## Beat ${s.beat}\nPreset: ${b.preset}${b.params ? `, params ${JSON.stringify(b.params)}` : ""}\nCaption: ${b.caption}\nParagraph (${textSourceNote(c.book).name}):\n${anchorContext(c, b.anchor, 1, 1)}\nReadouts at ~1 s: ${JSON.stringify(s.readouts)}${(s.later ?? []).map((l) => `\nReadouts at ~${l.t} s: ${JSON.stringify(l.readouts)}`).join("")}\nStage text over time (only changes):\n${timeline || "  (the stage draws no text)"}`,
     });
+    const strip = await beatStrip(s, path.join(path.dirname(s.shot), `${demo.id}-${s.beat}-strip.png`));
+    if (strip) content.push({ type: "text", text: `Beat ${s.beat} at ${times.slice(0, 1 + (s.later?.length ?? 0)).join(", ")} (left to right):` }, pngBlock(fs.readFileSync(strip)));
   }
-  if (check.sheet && fs.existsSync(check.sheet)) content.push({ type: "text", text: "Contact sheet (one row per beat; ~1 s, then the later frames, left to right):" }, pngBlock(fs.readFileSync(check.sheet)));
   content.push({ type: "text", text: "Review the demo. Reply as JSON." });
   const { data } = await callJson(SheetReviewSchema, {
     ...roleModel("review"),
@@ -911,7 +996,11 @@ export async function reviewSheet(c: Ctx, demo: DemoSpec, check: CheckResult): P
     maxTokens: 8000,
     cache: false,
   });
-  return { pass: data.pass, issues: data.pass ? [] : data.issues.length ? data.issues : ["the reviewer failed the demo without details"] };
+  const blockers = realBlockers(data.issues).map((i) => {
+    const text = `${i.text} (caption/paper: "${i.claim.trim()}"; shown: "${i.evidence.trim()}")`;
+    return i.beat === null || /\bbeats?\s+\d/i.test(i.text) ? text : `Beat ${i.beat}: ${text}`;
+  });
+  return { pass: blockers.length === 0, issues: blockers };
 }
 
 /** Feedback for the builder from deterministic notes (and, after a review, its issues). */
@@ -926,8 +1015,15 @@ function checkFeedback(notes: string[], check: CheckResult, from: "checks" | "re
       type: "text",
       text: 'An expected value comes from your spec, not from the checker. Re-check it against the text: if the readout is right and the expectation is wrong, correct the expectation instead of the code — add a ```json block {"expect": [{ "beat": <index>, "readout": "<id>", "value": <number>, "tol"?: <relative> }, …]} with the full corrected list (and no code if nothing else needs fixing).',
     });
+  if (notes.some((n) => /\) changes nothing: /.test(n)))
+    content.push({ type: "text", text: 'A control that changes nothing: wire it into the code, or — if the demo doesn\'t need it — remove it from the spec with a ```json block {"drop": ["<control id>"]} (its preset and beat values go with it).' });
+  if (from === "review")
+    content.push({
+      type: "text",
+      text: 'Decide per problem what is wrong. If the stage is right and a caption claims more than it shows, correct the caption — add a ```json block {"beats": [{ "caption"?, "preset"?, "params"? }, …]} with one entry per beat in order (an empty {} keeps a beat as it is); captions say what this beat\'s stage actually shows. If a beat should start from another preset or params, change them there too. Change the code only when the behaviour or the numbers are wrong.',
+    });
   if (check.sheet && fs.existsSync(check.sheet)) content.push({ type: "text", text: "All beats as rendered:" }, pngBlock(fs.readFileSync(check.sheet)));
-  content.push({ type: "text", text: 'Fix every problem (keep everything else as it is) and reply with the complete corrected file in one ```tsx block.' });
+  content.push({ type: "text", text: `Fix every problem (keep everything else as it is). Reply with the code changes${from === "review" ? " and/or the spec block; no code if only the spec changes" : ""}.` });
   return { role: "user", content };
 }
 
@@ -1010,6 +1106,7 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
     const { flagged: _f, ...rest } = d;
     return JSON.stringify(rest) + "\n" + (codeNow() ?? "");
   };
+  let reviewFixes = 0;
   const reviews = new Map<string, { pass: boolean; issues: string[] }>();
   let round = 0;
   let results: BeatResult[] = [];
@@ -1078,6 +1175,10 @@ export async function verifyDemoChecked(env: VerifyEnv, c: Ctx, demo: DemoSpec, 
         pass = true;
         break;
       }
+      // At most one revision on review findings: a second failing review flags the demo instead of
+      // spending more rounds (the checks' own fix rounds are separate).
+      if (reviewFixes >= 1) break;
+      reviewFixes++;
       if (opts.fix) {
         const next = round < rounds ? await opts.fix(r.issues, check, "review", round + 1) : null;
         if (!next || versionKey(next) === key) break;

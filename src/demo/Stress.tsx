@@ -198,6 +198,18 @@ export function StressHarness({ unitKey, demo }: { unitKey: string; demo: DemoSp
       return n ? ink / n : 1;
     };
 
+    /** Canvas pixels (sampled) plus readouts, as a string: equal strings mean the same state. */
+    const fingerprint = () => {
+      let h = 2166136261;
+      for (const st of stages()) {
+        const c = st.canvas;
+        const g = c?.width && c.height ? c.getContext("2d") : null;
+        if (!g) continue;
+        const { data } = g.getImageData(0, 0, c.width, c.height);
+        for (let i = 0; i < data.length; i += 4 * 5) h = Math.imul(h ^ ((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]), 16777619);
+      }
+      return `${h >>> 0}|${JSON.stringify(readouts.current)}`;
+    };
     let baseInk = 0;
     const inspect = (ctx: string) => {
       for (const m of drainErrors()) note(ctx, `console error: ${m.slice(0, 200)}`);
@@ -265,6 +277,38 @@ export function StressHarness({ unitKey, demo }: { unitKey: string; demo: DemoSp
       const start = base(0);
       for (const c of demo.controls) {
         for (const { v, what } of sweep(c, rnd)) await scenario(what, { params: { ...start, [c.id]: v }, preset: demo.beats[0]?.preset ?? "" }, 2.5, { share: 0.02 });
+      }
+      // Dead controls: each control's two extreme values, from a fresh start and the same number of
+      // frames, must differ somewhere on the stage or in a readout (a control the code never reads
+      // passed every other check). Tried from each preset until one shows a difference.
+      const bases = new Map<string, Params>();
+      demo.beats.forEach((b, i) => bases.has(b.preset) || bases.set(b.preset, base(i)));
+      for (const pr of demo.presets) if (!bases.has(pr.id)) bases.set(pr.id, { ...pr.params });
+      const presetBases = [...bases.entries()].slice(0, 4);
+      for (const c of demo.controls) {
+        const ends = c.type === "toggle" ? [true, false] : c.type === "select" ? [c.options[0]?.value, c.options[c.options.length - 1]?.value] : [c.min, c.max];
+        if (ends[0] === undefined || ends[0] === ends[1]) continue;
+        let live = false;
+        for (const [preset, params] of presetBases) {
+          const prints: string[] = [];
+          for (const v of ends) {
+            // Sampled at three times: a step-through may only diverge at a later step.
+            readouts.current = {};
+            const what = `"${c.label.replace(/\$/g, "")}" = ${String(v)} (effect)`;
+            await scenario(what, { params: { ...params, [c.id]: v as ParamValue }, preset, playing: true, resetKey: cur.resetKey + 1, w: BASE_SIZE.w, h: BASE_SIZE.h }, 2, { share: 0.01 });
+            let fp = fingerprint();
+            for (const more of [3, 5]) {
+              await scenario(what, {}, more, { share: 0.015 });
+              fp += "/" + fingerprint();
+            }
+            prints.push(fp);
+          }
+          if (prints[0] !== prints[1]) {
+            live = true;
+            break;
+          }
+        }
+        if (!live && !cancelled) note("every preset", `control "${c.label.replace(/\$/g, "")}" (${c.id}) changes nothing: at ${String(ends[0])} and ${String(ends[1])} the stage and every readout are identical — make the code use it, or drop the control if the demo doesn't need it`);
       }
       // Extremes of up to three sliders together.
       const sliders = demo.controls.filter((c): c is Extract<ControlSpec, { type: "slider" }> => c.type === "slider").slice(0, 3);
