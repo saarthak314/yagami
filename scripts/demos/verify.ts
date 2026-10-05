@@ -21,6 +21,7 @@ import type { BookConfig, DemoSpec, Expectation, ReadoutSpec } from "../../src/t
 import { buildEffort, demoRegions, loadConvo, regionsBlock, runConvo, saveSpec, toFixTurn } from "./build";
 import { anchorContext, anchorCrop, type Ctx, loadCtx, loadPlan, log, paths, pngBlock, tag, textSourceNote, writeJson } from "./common";
 import { domainOf } from "./domains";
+import { claimNotes, type Sample } from "./claims";
 import { modelSource, quoted, reviewModel } from "./fidelity";
 import { staticAudit } from "./rules";
 
@@ -248,6 +249,8 @@ export interface CheckShot {
   later?: LaterSample[];
   /** What the stage wrote, sampled every second from ~1 s to the last sample (only when it changed). */
   timeline?: { t: number; text: string }[];
+  /** The readouts every second from ~1 s to the last sample (caption claims about trends and bounds). */
+  series?: Sample[];
 }
 
 export interface CheckResult {
@@ -371,6 +374,7 @@ async function shootSettled(page: Page, env: VerifyEnv, c: Ctx, demo: DemoSpec, 
     if (text && timeline[timeline.length - 1]?.text !== text) timeline.push({ t, text });
   };
   note(SETTLE_MS / 1000, info.text);
+  const series: Sample[] = [{ t: SETTLE_MS / 1000, readouts }];
   if (ready && hasStage) {
     let at = SETTLE_MS / 1000;
     for (const t of LATER_SAMPLES) {
@@ -385,6 +389,9 @@ async function shootSettled(page: Page, env: VerifyEnv, c: Ctx, demo: DemoSpec, 
           }, step);
           at += step;
           note(Math.round(at), boxes);
+          // The shell publishes readouts at 10 Hz: give it a tick before reading them.
+          await page.waitForTimeout(120);
+          series.push({ t: Math.round(at), readouts: await readNow() });
         } catch (e) {
           errors.push(`runtime error while running on to t≈${t} s: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 160)}`);
           failed = true;
@@ -405,7 +412,7 @@ async function shootSettled(page: Page, env: VerifyEnv, c: Ctx, demo: DemoSpec, 
       later.push({ t, readouts: await readNow(), shot: file, changedFrom1s: s2 && st ? await stageDiff(s2, st) : 0, text: got.text, shapes: got.shapes });
     }
   }
-  return { beat, anchor: demo.beats[beat].anchor, ready, errors: [...new Set(errors)], readouts, changed, ink, shot, text: info.text, textBefore, stage: info.stage, shapes, later, timeline };
+  return { beat, anchor: demo.beats[beat].anchor, ready, errors: [...new Set(errors)], readouts, changed, ink, shot, text: info.text, textBefore, stage: info.stage, shapes, later, timeline, series };
 }
 
 /** Stage text in reading order (top to bottom, left to right), as one line. */
@@ -642,6 +649,9 @@ export function findings(demo: DemoSpec, s: CheckShot, expect: Expectation[]): s
       out.push(`the caption says ${q(r.label)} is ${m[1]}, but the readout shows ${q(shown)}`);
     }
   }
+
+  // Trends and bounds the caption states about a readout ("the loss jumps up", "stays below 0.125").
+  out.push(...claimNotes(caption, demo.readouts, s.series && s.series.length >= 3 ? s.series : samples.map((x, i) => ({ t: i === 0 ? 1 : (later[i - 1]?.t ?? 0), readouts: x.readouts }))));
 
   // Shapes cut off by the stage edge, in both the ~1 s frame and the last sample (layout, not motion).
   if (s.stage && s.shapes && later.length) {
