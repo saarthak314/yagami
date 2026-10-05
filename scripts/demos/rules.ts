@@ -23,7 +23,9 @@ Faithfulness rules (an expert compares every beat with the paper; these are the 
 - A caption says what that beat's stage visibly does with its preset and params: the objects, the behaviour and the outcome the reader will see. Never claim a sweep, overshoot, fork, second leader or curve that the beat doesn't draw. A true fact from the paper that the stage doesn't show is not a caption.
 - The beat's preset must reach the captioned state: if a caption is about one moment of a process (a split vote, the entry at index 7, the resize), give that beat params that set the process up to show it and hold it, rather than a moment inside a long loop shared with other beats.
 - Use the paper's own example, method and numbers where it gives them (its machine table, its source, its scenario). Compared values come from one table and row, the one the paragraph discusses. Don't simplify away the point the paragraph makes.
-- Every control and every preset parameter changes the stage or a readout, and a select or label shows the value that is actually simulated.`;
+- Every control and every preset parameter changes the stage or a readout, and a select or label shows the value that is actually simulated.
+- Experimental results (training curves, accuracies, measured timings) come from the paper's printed numbers, never from a made-up toy run that imitates them. Parameter wording is read in context ("small 1 − β₂" means β₂ close to 1).
+- A simulated frequency shown against an exact value or bound uses enough trials that sampling noise can't cross it, or shows the exact value beside it.`;
 
 /** A risky pattern in demo code and what to tell the builder. Only near-zero-false-positive patterns belong here. */
 interface Pattern {

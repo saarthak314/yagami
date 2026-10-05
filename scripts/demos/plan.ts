@@ -709,6 +709,7 @@ export const SELECTION_RULES = `Choosing demos, most important first (when the c
 2. Mechanisms, algorithms, constructions and central definitions or theorems.
 3. Worked examples that make a mechanism concrete.
 4. Results tables, ablations, related work and appendices — only if the cap leaves room.
+Simulate only what the text defines exactly: algorithms, protocols, equations, probability models, data structures and constructions, with the text's own example and constants. Experimental results (training curves, accuracies, benchmark scores, measured timings or latencies, behaviour on real data) cannot be reproduced by a toy simulation: never plan a toy model that imitates one. Show such a result from the paper's own numbers (the figure's or table's printed values, plotted or compared), or leave it out. A theorem's bound is shown with exactly the algorithm, step schedule and assumptions the theorem states.
 Never anchor a beat on exercises, problems or solutions, references, acknowledgements or front matter (contents, preface material, index). One demo per idea: never two demos of near-identical ideas. A beat whose caption names "Figure N" or "Table N" is anchored on that figure/table or on a paragraph that discusses it. Give a readout "range": [min, max] when its value has physical or mathematical bounds (errors and distances ≥ 0, probabilities in [0, 1], counts ≥ 0; null for an open side, e.g. [0, null]).`;
 
 function outlineSystem(book: BookConfig, catalog: string): string {
