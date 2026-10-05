@@ -184,6 +184,13 @@ const EST_TOKENS_PER_SECOND = 150;
  * a few seconds; a network drop of a minute or two used to fail whole books (every stage at once).
  */
 const RECONNECT_WAITS_MS = [10_000, 30_000, 60_000];
+/**
+ * A stream with no event for this long has stalled: healthy streams send their first event within
+ * seconds (p99 ≈ 4 s) and then stream steadily, while a stalled Opus build once hung 35 minutes.
+ */
+const STALL_MS = Number(process.env.YAGAMI_STALL_MS) || 90_000;
+
+class StalledError extends Error {}
 
 async function run(opts: CallOpts, format?: ReturnType<typeof betaZodOutputFormat>) {
   for (let attempt = 0; ; attempt++) {
@@ -191,7 +198,7 @@ async function run(opts: CallOpts, format?: ReturnType<typeof betaZodOutputForma
       return await runOnce(opts, format);
     } catch (e) {
       const wait = RECONNECT_WAITS_MS[attempt];
-      if (!(e instanceof Anthropic.APIConnectionError) || wait === undefined || opts.signal?.aborted) throw e;
+      if (!(e instanceof Anthropic.APIConnectionError || e instanceof StalledError) || wait === undefined || opts.signal?.aborted) throw e;
       await new Promise((r) => setTimeout(r, wait));
     }
   }
@@ -212,7 +219,15 @@ async function runOnce(opts: CallOpts, format?: ReturnType<typeof betaZodOutputF
   if (opts.onText) stream.on("text", opts.onText);
   const timing: Timing = { start: t0, end: 0 };
   let textChars = 0;
+  let lastEvent = Date.now();
+  let stalled = false;
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastEvent < STALL_MS) return;
+    stalled = true;
+    stream.abort();
+  }, 5_000);
   stream.on("streamEvent", (e) => {
+    lastEvent = Date.now();
     if (timing.first === undefined && e.type === "content_block_start") timing.first = Date.now();
     if (e.type === "content_block_delta" && e.delta.type === "text_delta") {
       timing.text ??= Date.now();
@@ -225,7 +240,7 @@ async function runOnce(opts: CallOpts, format?: ReturnType<typeof betaZodOutputF
   try {
     message = await stream.finalMessage();
   } catch (e) {
-    if (opts.signal?.aborted) {
+    if (opts.signal?.aborted || stalled) {
       // The losing side of a race: still account for what was billed until the abort. The
       // snapshot has the input/cache usage from message_start; output tokens only arrive at the
       // end, so estimate them from the streamed time (thinking isn't visible) and text.
@@ -235,10 +250,12 @@ async function runOnce(opts: CallOpts, format?: ReturnType<typeof betaZodOutputF
       const output = Math.max(Math.round(textChars / 4), Math.round(streamed * EST_TOKENS_PER_SECOND));
       const usage = { ...(snap?.usage ?? {}), output_tokens: output } as Anthropic.Beta.BetaUsage;
       logUsage(opts.label, opts.model, usage, timing, { aborted: true, outputEstimated: true });
+      if (stalled && !opts.signal?.aborted) throw new StalledError(`${opts.label}: stream stalled (no event for ${STALL_MS / 1000} s)`);
       throw new AbortedError(`${opts.label}: aborted`);
     }
     throw e;
   } finally {
+    clearInterval(watchdog);
     opts.signal?.removeEventListener("abort", onAbort);
   }
   timing.end = Date.now();
