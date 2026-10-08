@@ -196,6 +196,19 @@ async function checkKey(k: "anthropic" | "openai", key: string): Promise<void> {
   if (!r.ok) throw new HttpError(502, `couldn't check the key (the api answered ${r.status})`);
 }
 
+/**
+ * The line of a crashed run's stderr that says what went wrong: Node's crash output ends with stack
+ * frames and a "Node.js v24…" banner, so the last line is useless. Prefers the thrown error's message.
+ */
+export function errorLine(log: string): string | undefined {
+  const lines = log
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !/^at\s/.test(l) && !/^Node\.js v\d/.test(l) && !/^\^+$/.test(l) && !/^throw\b|^\{$|^\}$/.test(l));
+  const err = [...lines].reverse().find((l) => /\b\w*(Error|Exception)\b:|^error:|✗/i.test(l));
+  return (err ?? lines[lines.length - 1])?.replace(/^\w*Error:\s*/, "");
+}
+
 /** Model access on this server: the active provider (scripts/lib/claude.ts), whether it is set up, and how. */
 async function models(): Promise<{ ready: boolean; provider: string; billing: "api" | "subscription"; how?: string }> {
   const { providerStatus, billing, resetProvider } = await import("./lib/claude");
@@ -400,8 +413,8 @@ export function yagamiApi(): Plugin {
       if (j.stopRequested || code === 130) return finish(j, "stopped", "stopped");
       // 0: all ready; 1: the run completed with some demos failed (listed in the done event).
       if (code === 0 || (code === 1 && finished(j))) return finish(j, "done");
-      const last = j.log.trim().split("\n").filter(Boolean).pop();
-      finish(j, "failed", last ? last.slice(0, 300) : `the run exited with code ${code}`);
+      const why = errorLine(j.log);
+      finish(j, "failed", why ? why.slice(0, 300) : `the run exited with code ${code}`);
     });
   }
 
@@ -440,7 +453,7 @@ export function yagamiApi(): Plugin {
 
   async function preflight(kind: "text" | "scanned" | undefined) {
     const mm = await models();
-    if (!mm.ready) throw new HttpError(400, `no model access (${mm.provider}) — ${mm.how}`);
+    if (!mm.ready) throw new HttpError(400, (process.env.YAGAMI_PROVIDER ?? (await import("./lib/settings")).readSettings().provider) ? (mm.how ?? "the chosen model isn't set up") : `no model connected — ${mm.how}`);
     const t = await tools();
     if (!t.poppler) throw new HttpError(400, "poppler is not installed — it reads pdfs (macOS: brew install poppler)");
     if (!t.chromium) throw new HttpError(400, "headless chromium is missing — run: npx playwright install chromium");

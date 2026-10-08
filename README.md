@@ -18,17 +18,20 @@ npx playwright install chromium     # used to check every demo
 npm link                            # puts `yagami` on your PATH
 ```
 
-Then give it a model, any one of:
+Then connect a model. The easiest way is the model button on the site's home page (`yagami`, then "connect a
+model"): paste an API key, or log in to a Claude or ChatGPT plan. Or from a terminal, any one of:
 
 | | setup | billing |
 |---|---|---|
-| Anthropic API | `export ANTHROPIC_API_KEY=...` | per token |
-| Claude subscription | `claude auth login` (Claude Code, with your claude.ai plan) | your plan |
-| OpenAI API | `export OPENAI_API_KEY=...` | per token |
-| ChatGPT subscription | `codex login` (Codex CLI, with your ChatGPT plan) | your plan |
+| Anthropic API key | `export ANTHROPIC_API_KEY=...` | pay per use |
+| Claude plan | `claude auth login` (Claude Code, with your claude.ai plan) | included in your plan |
+| OpenAI API key | `export OPENAI_API_KEY=...` | pay per use |
+| ChatGPT plan | `codex login` (Codex CLI, with your ChatGPT plan) | included in your plan |
 
-yagami uses the first of these it finds, in that order; `YAGAMI_PROVIDER=anthropic|claude-sub|openai|openai-sub` picks
-one explicitly. Subscriptions run the model through the official CLI on your machine (`claude -p`, `codex exec`).
+Plans run the model through the official CLI on your machine (`claude -p`, `codex exec`). Keys and the choice
+made on the site are saved in `~/.config/yagami/settings.json` (readable only by you) and apply to the command line
+too; variables set in your shell take priority. Without a choice, yagami uses the first one connected, in the order
+above. `YAGAMI_PROVIDER=anthropic|claude-sub|openai|openai-sub` pins one.
 
 ## Usage
 
@@ -83,9 +86,10 @@ When it finishes, any demo that failed comes with the `yagami fix` command to re
 
 Models: with Claude, Opus 5.5 writes the demos and Sonnet 5.5 plans and reviews (medium effort, low for small
 fixes). In an audit of 10 papers against their text, Opus-written demos were 74% fully correct and 3% wrong. A paper
-takes 2–4 minutes and $1–4 on an API key (about $2.40 on average); spend is shown live and logged to
-`work/usage.jsonl`. With OpenAI, `gpt-5.5` does everything (`YAGAMI_OPENAI_MODEL` to change it). Per-step
-overrides: `YAGAMI_BUILD_MODEL`, `YAGAMI_REVIEW_MODEL`, `YAGAMI_PLAN_MODEL` (and `_EFFORT`).
+takes 2–4 minutes; on an Anthropic key it costs $1–4 (about $2.40 on average), on a plan it is included. With
+OpenAI, `gpt-5.5` does everything (`YAGAMI_OPENAI_MODEL` to change it), at OpenAI's prices on a key. Spend is shown
+live and logged to `work/usage.jsonl`. Per-step overrides: `YAGAMI_BUILD_MODEL`, `YAGAMI_REVIEW_MODEL`,
+`YAGAMI_PLAN_MODEL` (and `_EFFORT`).
 
 ## Layout
 
@@ -98,6 +102,6 @@ src/demo/reference/           hand-written example demos the generator follows
 ```
 
 Your books stay local and are git-ignored: `books/<slug>/` (the PDF and its config), `src/demos/<slug>/` (the
-generated demos), `public/books/` (page images) and `work/` (caches). Book text is only used as model input for
-planning; captions and demo specs are written fresh. It is sent to the model provider you choose. The site shows page images made from your PDFs; only publish it
-if you have the rights to that material.
+generated demos), `public/books/` (page images) and `work/` (caches). Book text is only used as model input (sent
+to the model you connect); captions and demo specs are written fresh. The site shows page images made from your
+PDFs; only publish it if you have the rights to that material.

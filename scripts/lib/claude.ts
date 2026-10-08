@@ -94,13 +94,33 @@ export function resetProvider(): void {
   resolved = null;
 }
 
+/** "claude-opus-5-5" → "opus 5.5", "gpt-5.5" stays. */
+const shortModel = (m: string) => m.replace(/^claude-([a-z]+)-(\d+)-(\d+).*$/, "$1 $2.$3");
+
+/** What a provider's models do, in a few words ("opus 5.5 writes demos · sonnet 5.5 reviews"). */
+function modelsLine(p: ProviderId): string {
+  const build = shortModel(modelFor(p, "build").model);
+  const review = shortModel(modelFor(p, "review").model);
+  return build === review ? `${build} does everything` : `${build} writes demos · ${review} reviews`;
+}
+
+/** The CLI a subscription provider runs is installed. */
+function hasCli(bin: string): boolean {
+  try {
+    execFileSync("which", [bin], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Every provider: whether it is set up, where its access comes from, and which one is active. */
 export function providersOverview(): {
   active: ProviderId;
   chosen: ProviderId | null;
   /** YAGAMI_PROVIDER pins the provider; the panel can't change it. */
   pinned: boolean;
-  providers: { id: ProviderId; ready: boolean; source: "env" | "saved" | "login" | null; hint: string | null; billing: "api" | "subscription" }[];
+  providers: { id: ProviderId; ready: boolean; source: "env" | "saved" | "login" | null; hint: string | null; billing: "api" | "subscription"; installed: boolean; models: string }[];
 } {
   const pinned = !!process.env.YAGAMI_PROVIDER;
   const claudeSub = claudeSubLoggedIn();
@@ -110,10 +130,10 @@ export function providersOverview(): {
     chosen: (process.env.YAGAMI_PROVIDER as ProviderId | undefined) ?? readSettings().provider ?? null,
     pinned,
     providers: [
-      { id: "anthropic", ready: anthropicKey(), source: keySource("anthropic") ?? (anthropicKey() ? "env" : null), hint: keyHint("anthropic"), billing: "api" },
-      { id: "claude-sub", ready: claudeSub, source: claudeSub ? "login" : null, hint: null, billing: "subscription" },
-      { id: "openai", ready: !!process.env.OPENAI_API_KEY, source: keySource("openai"), hint: keyHint("openai"), billing: "api" },
-      { id: "openai-sub", ready: chatgpt, source: chatgpt ? "login" : null, hint: null, billing: "subscription" },
+      { id: "anthropic", ready: anthropicKey(), source: keySource("anthropic") ?? (anthropicKey() ? "env" : null), hint: keyHint("anthropic"), billing: "api", installed: true, models: modelsLine("anthropic") },
+      { id: "claude-sub", ready: claudeSub, source: claudeSub ? "login" : null, hint: null, billing: "subscription", installed: hasCli("claude"), models: modelsLine("claude-sub") },
+      { id: "openai", ready: !!process.env.OPENAI_API_KEY, source: keySource("openai"), hint: keyHint("openai"), billing: "api", installed: true, models: modelsLine("openai") },
+      { id: "openai-sub", ready: chatgpt, source: chatgpt ? "login" : null, hint: null, billing: "subscription", installed: hasCli("codex"), models: modelsLine("openai-sub") },
     ],
   };
 }
@@ -123,13 +143,15 @@ export function providerStatus(): { provider: ProviderId; ready: boolean; how?: 
   const provider = activeProvider();
   switch (provider) {
     case "anthropic":
-      return anthropicKey() ? { provider, ready: true } : { provider, ready: false, how: "set ANTHROPIC_API_KEY, or log in to a Claude subscription (claude auth login), or set OPENAI_API_KEY, or log in to ChatGPT (codex login)" };
+      return anthropicKey()
+        ? { provider, ready: true }
+        : { provider, ready: false, how: "connect one in the site (yagami, then the model button), or set ANTHROPIC_API_KEY / OPENAI_API_KEY, or run claude auth login / codex login" };
     case "claude-sub":
-      return claudeSubLoggedIn() ? { provider, ready: true } : { provider, ready: false, how: "log in to Claude Code with your Claude subscription: claude auth login" };
+      return claudeSubLoggedIn() ? { provider, ready: true } : { provider, ready: false, how: "claude code isn't logged in to your claude plan — run claude auth login, or pick another model in the site" };
     case "openai":
-      return process.env.OPENAI_API_KEY ? { provider, ready: true } : { provider, ready: false, how: "set OPENAI_API_KEY" };
+      return process.env.OPENAI_API_KEY ? { provider, ready: true } : { provider, ready: false, how: "no openai key — set OPENAI_API_KEY or add one in the site's model panel" };
     case "openai-sub":
-      return codexChatGpt() ? { provider, ready: true } : { provider, ready: false, how: "log in to Codex with your ChatGPT account: codex login" };
+      return codexChatGpt() ? { provider, ready: true } : { provider, ready: false, how: "codex isn't logged in to your chatgpt plan — run codex login, or pick another model in the site" };
   }
 }
 
@@ -161,12 +183,17 @@ const isEffort = (e: string | undefined): e is Effort => e === "low" || e === "m
  * YAGAMI_DOMAIN_* (subject detection, default low effort). Models: opus, sonnet, haiku or a full id.
  */
 export function roleModel(role: Role): { model: Model; effort: Effort } {
+  return modelFor(activeProvider(), role);
+}
+
+/** roleModel for a given provider (the model panel shows each provider's models). */
+export function modelFor(provider: ProviderId, role: Role): { model: Model; effort: Effort } {
   const g = ROLE_GROUP[role];
   const fb = GROUP_FALLBACK[g];
   const m = process.env[`YAGAMI_${g}_MODEL`] ?? (fb ? process.env[`YAGAMI_${fb}_MODEL`] : undefined) ?? process.env.YAGAMI_MODEL;
   const e = process.env[`YAGAMI_${g}_EFFORT`] ?? (fb ? process.env[`YAGAMI_${fb}_EFFORT`] : undefined) ?? process.env.YAGAMI_EFFORT;
   const effort: Effort = isEffort(e) ? e : role === "domain" ? "low" : "medium";
-  if (isOpenAi(activeProvider())) return { model: m && !/^(opus|sonnet|haiku|claude-)/.test(m) ? m : (process.env.YAGAMI_OPENAI_MODEL ?? OPENAI_DEFAULT), effort };
+  if (isOpenAi(provider)) return { model: m && !/^(opus|sonnet|haiku|claude-)/.test(m) ? m : (process.env.YAGAMI_OPENAI_MODEL ?? OPENAI_DEFAULT), effort };
   const builds = g === "BUILD" || g === "TEMPLATE";
   const model =
     m === "opus" || m === MODELS.opus ? MODELS.opus : m === "haiku" || m === MODELS.haiku ? MODELS.haiku : m === "sonnet" || m === MODELS.sonnet ? MODELS.sonnet : builds ? MODELS.opus : MODELS.sonnet;

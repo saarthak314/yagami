@@ -37,8 +37,9 @@ const USAGE = [
   `       ${color.muted('yagami fix "label smoothing" "legend too big"')}`,
   "",
   `  ${color.dim("while it runs: o open · d details · q quit")}`,
-  `  ${color.dim("models: an anthropic or openai key, or a claude or chatgpt subscription")}`,
-  `  ${color.dim("(YAGAMI_PROVIDER = anthropic · claude-sub · openai · openai-sub)")}`,
+  `  ${color.dim("models: connect one in the site (the model button), set ANTHROPIC_API_KEY")}`,
+  `  ${color.dim("or OPENAI_API_KEY, or run claude auth login / codex login to use your plan")}`,
+  `  ${color.dim("YAGAMI_PROVIDER=anthropic|claude-sub|openai|openai-sub picks one")}`,
 ].join("\n");
 
 const HELP = `\n${BRAND}\n\n${USAGE}\n`;
@@ -64,7 +65,10 @@ async function preflightModels() {
   } catch (e) {
     fail((e as Error).message);
   }
-  if (!st.ready) fail(`no model access (${st.provider}) — ${st.how}`);
+  // A provider chosen in the site (or by YAGAMI_PROVIDER) explains itself; automatic means none is set up.
+  const { readSettings } = await import("../scripts/lib/settings");
+  const chosen = process.env.YAGAMI_PROVIDER ?? readSettings().provider;
+  if (!st.ready) fail(chosen ? st.how! : `no model connected — ${st.how}`);
   const { chromium } = await import("playwright");
   if (!fs.existsSync(chromium.executablePath())) fail("headless chromium is missing — run: npx playwright install chromium");
 }
