@@ -87,7 +87,8 @@ When it finishes, any demo that failed comes with the `yagami fix` command to re
 Models: with Claude, Opus 5.5 writes the demos and Sonnet 5.5 plans and reviews (medium effort, low for small
 fixes). In an audit of 10 papers against their text, Opus-written demos were 74% fully correct and 3% wrong. A paper
 takes 2–4 minutes; on an Anthropic key it costs $1–4 (about $2.40 on average), on a plan it is included. With
-OpenAI, `gpt-5.5` does everything (`YAGAMI_OPENAI_MODEL` to change it), at OpenAI's prices on a key. Spend is shown
+OpenAI, `gpt-5.5` does everything on a key (at OpenAI's prices), and `gpt-5.6-sol` at xhigh effort on a ChatGPT
+plan (`YAGAMI_OPENAI_MODEL` / `YAGAMI_EFFORT` to change them). Spend is shown
 live and logged to `work/usage.jsonl`. Per-step overrides: `YAGAMI_BUILD_MODEL`, `YAGAMI_REVIEW_MODEL`,
 `YAGAMI_PLAN_MODEL` (and `_EFFORT`).
 

@@ -39,8 +39,11 @@ export const MODELS = {
 export type Model = string;
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
-/** Default OpenAI model for every role (YAGAMI_OPENAI_MODEL, or YAGAMI_<GROUP>_MODEL per group). */
+/** Default OpenAI model for every role on an API key (YAGAMI_OPENAI_MODEL, or YAGAMI_<GROUP>_MODEL per group). */
 export const OPENAI_DEFAULT = "gpt-5.5";
+/** On a ChatGPT plan (Codex): GPT-5.6 at xhigh effort for every call — the plan, not tokens, pays for it. */
+export const CODEX_DEFAULT = "gpt-5.6-sol";
+const CODEX_EFFORT: Effort = "xhigh";
 
 const PROVIDERS: ProviderId[] = ["anthropic", "claude-sub", "openai", "openai-sub"];
 let resolved: ProviderId | null = null;
@@ -192,8 +195,11 @@ export function modelFor(provider: ProviderId, role: Role): { model: Model; effo
   const fb = GROUP_FALLBACK[g];
   const m = process.env[`YAGAMI_${g}_MODEL`] ?? (fb ? process.env[`YAGAMI_${fb}_MODEL`] : undefined) ?? process.env.YAGAMI_MODEL;
   const e = process.env[`YAGAMI_${g}_EFFORT`] ?? (fb ? process.env[`YAGAMI_${fb}_EFFORT`] : undefined) ?? process.env.YAGAMI_EFFORT;
-  const effort: Effort = isEffort(e) ? e : role === "domain" ? "low" : "medium";
-  if (isOpenAi(provider)) return { model: m && !/^(opus|sonnet|haiku|claude-)/.test(m) ? m : (process.env.YAGAMI_OPENAI_MODEL ?? OPENAI_DEFAULT), effort };
+  const effort: Effort = isEffort(e) ? e : provider === "openai-sub" ? CODEX_EFFORT : role === "domain" ? "low" : "medium";
+  if (isOpenAi(provider)) {
+    const fallback = process.env.YAGAMI_OPENAI_MODEL ?? (provider === "openai-sub" ? CODEX_DEFAULT : OPENAI_DEFAULT);
+    return { model: m && !/^(opus|sonnet|haiku|claude-)/.test(m) ? m : fallback, effort };
+  }
   const builds = g === "BUILD" || g === "TEMPLATE";
   const model =
     m === "opus" || m === MODELS.opus ? MODELS.opus : m === "haiku" || m === MODELS.haiku ? MODELS.haiku : m === "sonnet" || m === MODELS.sonnet ? MODELS.sonnet : builds ? MODELS.opus : MODELS.sonnet;
@@ -206,7 +212,7 @@ export function modelFor(provider: ProviderId, role: Role): { model: Model; effo
  */
 export function fixEffort(): Effort {
   const e = process.env.YAGAMI_FIX_EFFORT;
-  return isEffort(e) ? e : "low";
+  return isEffort(e) ? e : activeProvider() === "openai-sub" ? CODEX_EFFORT : "low";
 }
 
 /** Haiku 4.5 takes no effort parameter and no adaptive thinking (thinking is simply omitted). */
