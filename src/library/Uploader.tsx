@@ -3,7 +3,7 @@
 // on the yagami server; this only starts it and hands over to the progress view.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ApiError, costNote, isTouch, missingPrereqs, openModels, startBuild, upload, type Health, type UploadInfo } from "../lib/api";
+import { ApiError, costNote, isTouch, missingPrereqs, modelGap, openModels, startBuild, upload, useModelsView, type Health, type ModelsView, type UploadInfo } from "../lib/api";
 import { isNumbered, planFor } from "../lib/data";
 import { buildHash, hashFor } from "../lib/route";
 import { Cross, Spinner, UploadIcon } from "../ui/icons";
@@ -21,11 +21,24 @@ const chapterLabel = (u: { id: string; title: string }) => (isNumbered(u.id) && 
 const pageCount = (u: { pages: [number, number] }) => u.pages[1] - u.pages[0] + 1;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** Why building can't start on this server for this file (or null). */
-export function blockedReason(health: Health | null | undefined, kind?: "text" | "scanned"): string | null {
-  const m = missingPrereqs(health).filter((x) => !x.scansOnly || kind === "scanned");
+/** Why building can't start on this server for this file (or null). Names the chosen model when it isn't set up. */
+export function blockedReason(health: Health | null | undefined, kind?: "text" | "scanned", models?: ModelsView | null, verb = "build"): string | null {
+  const m = missingPrereqs(health, models).filter((x) => !x.scansOnly || kind === "scanned");
   if (!m.length) return null;
-  return `can't build yet — missing ${m.map((x) => (x.models ? x.what : `${x.what} (${x.how})`)).join(", ")}`;
+  const model = m.find((x) => x.models);
+  const tools = m.filter((x) => !x.models).map((x) => `${x.what} (${x.how})`);
+  return `can't ${verb} yet — ${[model?.what, tools.length ? `missing ${tools.join(", ")}` : null].filter(Boolean).join(" · ")}`;
+}
+
+/** "connect a model" — or, when a chosen provider isn't set up, "log in or switch" — opening the model panel. */
+export function ConnectButton({ health, models, className = "btn small" }: { health: Health | null | undefined; models?: ModelsView | null; className?: string }) {
+  const gap = modelGap(health, models);
+  if (!gap) return null;
+  return (
+    <button className={className} onClick={openModels}>
+      {gap.how}
+    </button>
+  );
 }
 
 /**
@@ -41,13 +54,14 @@ function defaultPick(info: UploadInfo): string[] {
 
 /** Quiet list of what's missing for building, shown up front (before any upload). */
 function Prereqs({ health }: { health: Health | null | undefined }) {
-  const m = missingPrereqs(health);
+  const models = useModelsView();
+  const m = missingPrereqs(health, models);
   if (!m.length) return null;
   return (
     <ul className="prereqs" aria-label="missing for building">
       {m.map((x) => (
         <li key={x.what}>
-          <span className="prereq-what">{x.what} missing{x.scansOnly ? " (only for scanned pdfs)" : ""}</span>
+          <span className="prereq-what">{x.models ? x.what : `${x.what} missing${x.scansOnly ? " (only for scanned pdfs)" : ""}`}</span>
           {x.models ? (
             <button className="btn small" onClick={openModels}>
               {x.how}
@@ -295,7 +309,8 @@ function Ready({
   const { info } = st;
   const multi = info.units.length > 1;
   const existing = info.existing;
-  const blocked = blockedReason(health, info.kind);
+  const models = useModelsView();
+  const blocked = blockedReason(health, info.kind, models);
   const picked = new Set(st.picked);
   const fresh = info.units.filter((u) => !u.built);
   const chosen = fresh.filter((u) => picked.has(u.id));
@@ -393,11 +408,7 @@ function Ready({
           {blocked && (
             <p className="upload-blocked" role="alert">
               {blocked}
-              {!health?.credentials && (
-                <button className="btn small" onClick={openModels}>
-                  connect a model
-                </button>
-              )}
+              <ConnectButton health={health} models={models} />
             </p>
           )}
           {st.startError && (

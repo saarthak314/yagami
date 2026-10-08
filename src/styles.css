@@ -2919,6 +2919,7 @@ h3[tabindex="-1"]:focus {
   flex-shrink: 0;
 }
 
+/* A bordered pill like the search button, at every width. */
 .model-btn {
   display: inline-flex;
   align-items: center;
@@ -2957,12 +2958,16 @@ h3[tabindex="-1"]:focus {
   box-shadow: inset 0 0 0 1px var(--muted);
 }
 
+.model-dot.auto.picked {
+  background: var(--muted);
+}
+
 .model-panel {
   position: absolute;
   right: 0;
   top: 36px;
   z-index: 50;
-  width: 380px;
+  width: 392px;
   max-height: calc(100dvh - 64px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -3006,6 +3011,10 @@ h3[tabindex="-1"]:focus {
 }
 
 .model-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
   margin: 8px 8px 0;
   padding: 8px 12px;
   border-left: 2px solid var(--accent2);
@@ -3015,17 +3024,51 @@ h3[tabindex="-1"]:focus {
   color: var(--fg);
 }
 
+.model-banner > span {
+  flex: 1 1 180px;
+}
+
+.model-banner .btn.small {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Information, not a problem: a neutral rule. */
+.model-banner.info {
+  border-left-color: var(--line-strong);
+  color: var(--muted);
+}
+
+.model-banner code,
+.model-note code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg);
+}
+
 .model-list {
   list-style: none;
   margin: 0;
   padding: 4px;
 }
 
+/* name + tag | actions; then status, what it costs, notes, forms across the row. */
 .model-row {
   display: grid;
-  gap: 2px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: 2px;
   padding: 10px 12px;
   border-radius: 6px;
+}
+
+.model-row > * {
+  grid-column: 1 / -1;
+}
+
+.model-row > .model-row-head,
+.model-row > .model-status {
+  grid-column: 1;
 }
 
 .model-row + .model-row {
@@ -3046,63 +3089,141 @@ h3[tabindex="-1"]:focus {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   min-height: 24px;
 }
 
 .model-name {
-  flex: 1;
   min-width: 0;
   font-size: 13px;
   color: var(--fg);
 }
 
-.model-row-head .btn.small {
+.tag.in-use {
+  border-color: var(--accent);
+  /* The accent, pulled toward the text colour: 4.5:1 on the panel in every theme. */
+  color: color-mix(in srgb, var(--accent) 72%, var(--fg));
+}
+
+.tag.chosen {
+  border-color: var(--accent2);
+  color: var(--fg);
+}
+
+/* The one place a row's buttons go: top right, the main action above key management. */
+.model-row-actions {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: start;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  max-width: 132px;
+  margin-left: 12px;
+}
+
+.model-row-actions .btn,
+.model-banner .btn,
+.model-install .btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-.tag.in-use {
-  border-color: var(--accent);
-  color: var(--accent);
+.model-break {
+  flex-basis: 100%;
+  height: 0;
 }
 
-.model-row-sub {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 8px;
-  min-height: 24px;
-  padding-left: 14px;
+.model-remove {
+  color: var(--muted);
 }
 
-.model-status {
-  flex: 1;
+.model-remove:hover:not(:disabled) {
+  color: var(--fg);
+}
+
+.btn.model-danger {
+  border-color: var(--accent2);
+}
+
+.model-status,
+.model-meta,
+.model-note {
   min-width: 0;
+  padding-left: 14px;
   font-size: 12px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
-.model-status.off {
-  color: var(--faint);
+.model-status {
+  align-self: center;
+  color: var(--fg);
 }
 
-.model-row-actions {
-  display: inline-flex;
-  gap: 4px;
+.model-status.off,
+.model-auto .model-status {
+  color: var(--muted);
 }
 
-.model-row-actions .btn {
-  display: inline-flex;
+.model-note {
+  font-size: 11px;
+}
+
+.model-ext {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 2px;
+}
+
+.model-ext:hover {
+  text-decoration-color: currentColor;
+}
+
+.model-install {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  margin: 6px 0 2px 14px;
 }
 
-.model-meta {
-  padding-left: 14px;
+.model-login .model-install {
+  margin: 0;
+}
+
+.model-install code {
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.model-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 2px 14px;
+  padding: 6px 6px 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg);
   font-size: 12px;
-  color: var(--faint);
+  color: var(--fg);
+}
+
+.model-confirm > span {
+  flex: 1 1 auto;
 }
 
 .model-form,
@@ -3110,10 +3231,6 @@ h3[tabindex="-1"]:focus {
   display: grid;
   gap: 6px;
   margin: 8px 0 2px 14px;
-}
-
-.model-login .model-form {
-  margin: 2px 0 0;
 }
 
 .model-label {
@@ -3153,17 +3270,12 @@ h3[tabindex="-1"]:focus {
   border-color: var(--accent2);
 }
 
-.model-input:disabled {
+.model-input:read-only[aria-busy="true"] {
   color: var(--muted);
 }
 
 .model-inline .btn {
   height: 28px;
-}
-
-.model-note {
-  font-size: 11px;
-  color: var(--faint);
 }
 
 .model-error {
@@ -3192,15 +3304,66 @@ h3[tabindex="-1"]:focus {
   gap: 8px;
   margin: 0;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--fg);
 }
 
 .model-wait .spinner {
   flex-shrink: 0;
 }
 
+.model-login .model-note {
+  margin: 0;
+  padding: 0;
+}
+
 .model-link {
   justify-self: start;
+}
+
+/* Claude's login: two numbered steps. */
+.model-steps {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.model-steps > li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.model-step-n {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-step-body {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--fg);
+}
+
+.model-step-body > .model-inline {
+  width: 100%;
+}
+
+.model-step-hint {
+  color: var(--muted);
 }
 
 .model-done {
@@ -3222,6 +3385,18 @@ h3[tabindex="-1"]:focus {
   gap: 6px;
 }
 
+/* Loading (rarely seen: the view is fetched with the page): rows of the same height. */
+.model-skel {
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  min-height: 78px;
+}
+
+.model-skel .skel-line {
+  grid-column: 1;
+}
+
 .prereqs .btn.small {
   height: 22px;
 }
@@ -3231,11 +3406,21 @@ h3[tabindex="-1"]:focus {
   vertical-align: baseline;
 }
 
+/* A reason with its button: the button wraps under the text without an indent. */
+.upload-blocked:has(> .btn) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.upload-blocked:has(> .btn) > .btn.small {
+  margin-left: 0;
+}
+
 @media (max-width: 899px) {
-  .topbar .model-btn {
-    height: 44px;
-    border-color: transparent;
-    background: transparent;
+  .topbar .model-wrap {
+    margin: 0 4px;
   }
 }
 
@@ -3246,17 +3431,15 @@ h3[tabindex="-1"]:focus {
   .model-btn-phone {
     display: inline-flex;
   }
-  /* Connected: the chip icon with the status dot on its corner. */
+  /* Connected: the chip icon in a pill, the status dot on its corner. */
   .topbar .model-btn:not(.cta) {
     position: relative;
-    width: 44px;
-    padding: 0;
-    justify-content: center;
+    padding: 0 9px;
   }
   .model-btn:not(.cta) .model-dot {
     position: absolute;
-    top: 12px;
-    right: 11px;
+    top: 4px;
+    right: 4px;
     box-shadow: 0 0 0 2px var(--bg);
   }
   .model-btn.cta {
@@ -3274,11 +3457,19 @@ h3[tabindex="-1"]:focus {
 }
 
 @media (pointer: coarse) {
+  .topbar .model-btn,
+  .topbar .search-btn {
+    height: 36px;
+  }
   .model-row .btn.small,
+  .model-banner .btn.small,
   .model-inline .btn,
   .model-login .btn {
     height: 36px;
     padding: 0 12px;
+  }
+  .model-row-actions {
+    max-width: 160px;
   }
   .model-input {
     height: 36px;

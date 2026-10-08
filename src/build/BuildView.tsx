@@ -4,14 +4,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Library } from "../types";
-import { ApiError, continueBook, JOB_GONE, startFix, stopJob, type Health, type JobSummary } from "../lib/api";
+import { ApiError, continueBook, JOB_GONE, onPlan, startFix, stopJob, useModelsView, type Health, type JobSummary } from "../lib/api";
 import { isActive, phaseWord, shortReason, useJob, type JobDemo, type JobState, type JobUnit } from "../lib/job";
 import { assetUrl, isNumbered, loadUnit, planFor } from "../lib/data";
 import { buildHash, hashFor } from "../lib/route";
 import { Check, Cross, Spinner } from "../ui/icons";
-import { blockedReason } from "../library/Uploader";
+import { blockedReason, ConnectButton } from "../library/Uploader";
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** What a run cost: dollars on an api key; on a subscription nothing is charged, so no "$0.00". */
+const money = (cost: number, health: Health | null | undefined) => (cost === 0 && onPlan(health) ? "on your plan" : `$${cost.toFixed(2)}`);
 
 function duration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -93,7 +96,11 @@ export function BuildView({ job, library, jobs, health }: { job: string; library
   const [stopping, setStopping] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
-  const blocked = blockedReason(health);
+  const models = useModelsView();
+  // Something here needs a model (resume / retry, or fixing a failed demo): say why it can't, visibly.
+  const canResume = finished && !isFix && (outcome === "stopped" || outcome === "failed");
+  const wantsModel = canResume || (finished && !!book && failed.length > 0);
+  const blocked = blockedReason(health, undefined, models, canResume ? "build" : "fix");
 
   const resume = async () => {
     setRetrying(true);
@@ -145,8 +152,8 @@ export function BuildView({ job, library, jobs, health }: { job: string; library
         {counts && <span>{counts}</span>}
         <span>{duration(elapsed)}</span>
         <span>
-          ${cost.toFixed(2)}
-          {outcome === "running" ? " so far" : ""}
+          {money(cost, health)}
+          {outcome === "running" && !(cost === 0 && onPlan(health)) ? " so far" : ""}
         </span>
       </div>
       <div className="library-inner">
@@ -208,12 +215,18 @@ export function BuildView({ job, library, jobs, health }: { job: string; library
                 </button>
               )}
               {!isFix && (outcome === "stopped" || outcome === "failed") && (
-                <button className="btn" onClick={resume} disabled={retrying || !!blocked} title={blocked ?? undefined}>
+                <button className="btn" onClick={resume} disabled={retrying || !!blocked} aria-describedby={blocked ? "build-blocked" : undefined}>
                   {retrying ? "starting…" : outcome === "stopped" ? "resume" : "retry"}
                 </button>
               )}
             </div>
             {outcome === "running" && <p className="build-hint">it keeps running if you close this tab — open the book any time.</p>}
+            {wantsModel && blocked && (
+              <p className="upload-blocked" id="build-blocked">
+                {blocked}
+                <ConnectButton health={health} models={models} />
+              </p>
+            )}
             {actionError && <p className="upload-blocked">{actionError}</p>}
           </div>
         </header>
@@ -239,7 +252,7 @@ export function BuildView({ job, library, jobs, health }: { job: string; library
           {isFix && demos.length === 0 && outcome === "running" && <SkeletonRows n={1} asItems />}
         </section>
 
-        {finished && <FinishedSummary state={state} outcome={outcome} isFix={isFix} elapsed={elapsed} cost={cost} runError={runError} />}
+        {finished && <FinishedSummary state={state} outcome={outcome} isFix={isFix} elapsed={elapsed} cost={cost} runError={runError} health={health} />}
       </div>
     </main>
   );
@@ -309,7 +322,7 @@ function DemoRow({ d, slug, finished, health, hasBook }: { d: JobDemo; slug: str
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
-  const blocked = blockedReason(health);
+  const blocked = blockedReason(health, undefined, useModelsView());
   const close = () => {
     setFixing(false);
     requestAnimationFrame(() => opener.current?.focus());
@@ -324,7 +337,7 @@ function DemoRow({ d, slug, finished, health, hasBook }: { d: JobDemo; slug: str
       </span>
       {d.phase === "fail" && d.detail && <span className="build-reason">{shortReason(d.detail)}</span>}
       {d.phase === "fail" && finished && hasBook && !fixing && (
-        <button ref={opener} className="btn small" onClick={() => setFixing(true)} disabled={!!blocked} title={blocked ?? "describe what's wrong and yagami revises it"}>
+        <button ref={opener} className="btn small" onClick={() => setFixing(true)} disabled={!!blocked} aria-describedby={blocked ? "build-blocked" : undefined} title={blocked ? undefined : "describe what's wrong and yagami revises it"}>
           fix
         </button>
       )}
@@ -372,7 +385,7 @@ function DemoRow({ d, slug, finished, health, hasBook }: { d: JobDemo; slug: str
             <button type="button" className="btn ghost small" onClick={close} disabled={sending}>
               cancel
             </button>
-            <span className="upload-hint">a fix usually costs under $0.50</span>
+            <span className="upload-hint">{onPlan(health) ? "a fix uses your plan" : "a fix usually costs under $0.50"}</span>
           </div>
         </form>
       )}
@@ -380,7 +393,23 @@ function DemoRow({ d, slug, finished, health, hasBook }: { d: JobDemo; slug: str
   );
 }
 
-function FinishedSummary({ state, outcome, isFix, elapsed, cost, runError }: { state: JobState; outcome: Outcome; isFix: boolean; elapsed: number; cost: number; runError: string | null }) {
+function FinishedSummary({
+  state,
+  outcome,
+  isFix,
+  elapsed,
+  cost,
+  runError,
+  health,
+}: {
+  state: JobState;
+  outcome: Outcome;
+  isFix: boolean;
+  elapsed: number;
+  cost: number;
+  runError: string | null;
+  health: Health | null | undefined;
+}) {
   const demos = state.demos;
   const ready = demos.filter((d) => d.phase === "pass").length;
   const failed = demos.filter((d) => d.phase === "fail").length;
@@ -414,7 +443,7 @@ function FinishedSummary({ state, outcome, isFix, elapsed, cost, runError }: { s
         <span className="glyph">{outcome === "ok" ? <Check /> : outcome === "stopped" ? <span className="dash" aria-hidden /> : <Cross />}</span>
         <span>{head}</span>
         <span className="muted">· {duration(time)}</span>
-        <span className="muted">· ${cost.toFixed(2)}</span>
+        <span className="muted">· {money(cost, health)}</span>
       </p>
       {runError && <p className="upload-blocked">{shortReason(runError)}</p>}
       {hint && <p className="upload-note">{hint}</p>}

@@ -2,6 +2,7 @@
 // See work/design/web-upload.md for the contract. When the site is served without
 // it (a static export), `health()` resolves to null and the upload UI stays hidden.
 
+import { useSyncExternalStore } from "react";
 import type { PipelineEvent } from "../../scripts/lib/events";
 
 export type { PipelineEvent };
@@ -170,6 +171,10 @@ export interface ProviderState {
   /** Last four characters of the key ("…a1b2"). */
   hint: string | null;
   billing: "api" | "subscription";
+  /** Subscriptions: the CLI it runs (claude / codex) is installed. Always true for keys. */
+  installed: boolean;
+  /** What its models do, from the real settings ("opus 5.5 writes demos · sonnet 5.5 reviews"). */
+  models: string;
 }
 
 export interface LoginState {
@@ -237,25 +242,74 @@ export const MODELS_CHANGED = "yagami:models";
 export const OPEN_MODELS = "yagami:open-models";
 export const openModels = () => window.dispatchEvent(new Event(OPEN_MODELS));
 
+/** How each provider is named: in the panel, in the header, and when it's chosen but not set up. */
+export const PROVIDERS: Record<ProviderId, { name: string; short: string; missing: string; fix: string }> = {
+  anthropic: { name: "anthropic api key", short: "anthropic key", missing: "no anthropic api key added", fix: "add a key or switch" },
+  "claude-sub": { name: "claude subscription", short: "claude plan", missing: "claude subscription isn't logged in", fix: "log in or switch" },
+  openai: { name: "openai api key", short: "openai key", missing: "no openai api key added", fix: "add a key or switch" },
+  "openai-sub": { name: "chatgpt subscription", short: "chatgpt plan", missing: "chatgpt subscription isn't logged in", fix: "log in or switch" },
+};
+const isProvider = (id: string | undefined): id is ProviderId => !!id && id in PROVIDERS;
+
+// The model panel's last view of the providers, shared with the rest of the page (it knows what is
+// chosen, which /api/health doesn't say).
+let modelsSnapshot: ModelsView | null = null;
+const listeners = new Set<() => void>();
+export function publishModels(v: ModelsView | null) {
+  if (v === modelsSnapshot) return;
+  modelsSnapshot = v;
+  listeners.forEach((l) => l());
+}
+const subscribeModels = (l: () => void) => {
+  listeners.add(l);
+  return () => listeners.delete(l);
+};
+/** The model panel's view of the providers (null until it has loaded). */
+export const useModelsView = () => useSyncExternalStore(subscribeModels, () => modelsSnapshot);
+
+/**
+ * Why the server can't use a model, or null when it can: the provider chosen isn't set up
+ * ("claude subscription isn't logged in"), or none is connected at all.
+ */
+export function modelGap(h: Health | null | undefined, v?: ModelsView | null): { id: ProviderId | null; what: string; how: string } | null {
+  if (!h || h.credentials) return null;
+  // "automatic" only falls back to the anthropic key when nothing is set up: any other provider not
+  // ready is one that was chosen. For anthropic, the panel's view says whether it was chosen.
+  const id = isProvider(h.provider) ? h.provider : null;
+  const chosen = id && (id !== "anthropic" || (v && v.chosen === "anthropic" && v.active === "anthropic"));
+  if (id && chosen) return { id, what: PROVIDERS[id].missing, how: PROVIDERS[id].fix };
+  return { id: null, what: "no model connected", how: "connect a model" };
+}
+
 /** Everything missing for building on this server, as short plain phrases (empty when ready). */
-export function missingPrereqs(h: Health | null | undefined): { what: string; how: string; scansOnly?: boolean; models?: boolean }[] {
+export function missingPrereqs(h: Health | null | undefined, v?: ModelsView | null): { what: string; how: string; scansOnly?: boolean; models?: boolean }[] {
   if (!h) return [];
   const out: { what: string; how: string; scansOnly?: boolean; models?: boolean }[] = [];
-  if (!h.credentials) out.push({ what: "model access", how: "connect a model", models: true });
+  const gap = modelGap(h, v);
+  if (gap) out.push({ what: gap.what, how: gap.how, models: true });
   if (!h.tools.poppler) out.push({ what: "poppler", how: "brew install poppler" });
   if (!h.tools.chromium) out.push({ what: "headless chromium", how: "npx playwright install chromium" });
   if (!h.tools.tesseract) out.push({ what: "tesseract", how: "brew install tesseract", scansOnly: true });
   return out;
 }
 
-/** Rough cost of building on an API key: about $2.50 per paper or chapter (Opus writes the demos). */
+/** Rough cost of building on an anthropic key: about $2.50 per paper or chapter (Opus writes the demos). */
 export const estimate = (units: number) => `about $${Math.round(Math.max(1, units) * 2.5)}`;
 
-/** What building costs, in words, for the server's provider. */
+/** The server builds on a subscription: no dollar figures, it uses the plan. */
+export const onPlan = (h: Health | null | undefined) => h?.billing === "subscription";
+
+/** What building costs, in words, for the server's provider. `what`: "this paper", "3 chapters". */
 export function costNote(h: Health | null | undefined, units: number, what: string): string {
-  if (h?.billing === "subscription") return `building uses your ${h.provider === "openai-sub" ? "chatgpt" : "claude"} subscription for ${what}. you can stop it any time.`;
-  const api = h?.provider === "openai" ? "the openai api" : "the anthropic api";
-  return units > 0 ? `building uses ${api}: ${estimate(units)} for ${what}. you can stop it any time.` : `building uses ${api} — about $2.50 per chapter.`;
+  const stop = "you can stop it any time.";
+  if (onPlan(h)) {
+    const plan = h?.provider === "openai-sub" ? "chatgpt" : "claude";
+    return `building uses your ${plan} plan${units > 0 ? ` for ${what}` : ""} — no api cost. ${stop}`;
+  }
+  if (h?.provider === "openai") return `building on your openai key is pay per use. ${stop}`;
+  // Nothing connected yet: what it would cost either way, without claiming a provider.
+  if (!h?.credentials) return units > 0 ? `${what}: ${estimate(units)} on an anthropic key, or included in a claude or chatgpt plan.` : "about $2.50 a chapter on an anthropic key, or included in a claude or chatgpt plan.";
+  return units > 0 ? `building ${what} on your anthropic key costs ${estimate(units)}. ${stop}` : "building on your anthropic key costs about $2.50 a chapter.";
 }
 
 /** Touch devices: "choose", not "drop"; no keyboard hints. */
