@@ -63,7 +63,7 @@ export function Palette({
           aria-expanded="true"
           aria-autocomplete="list"
           aria-label="Search"
-          placeholder="search books, chapters, sections, demos and themes"
+          placeholder="search books, sections, demos, themes"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {

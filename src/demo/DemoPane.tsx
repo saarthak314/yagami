@@ -153,6 +153,9 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
   const logical = { w: Math.round(size.w / scale), h: Math.round(size.h / scale) };
   const setParam = (id: string, v: ParamValue) => setEdits((e) => ({ ...e, [id]: v }));
   const showSetup = demo.presets.length > 1 && !setupDuplicated(demo.presets, demo.controls);
+  // Sliders and pickers get a full row each (a slider needs length to be usable); switches share rows after them.
+  const rows = demo.controls.filter((c) => c.type !== "toggle");
+  const toggles = demo.controls.filter((c) => c.type === "toggle");
 
   return (
     <section className="demo-pane">
@@ -163,10 +166,12 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
             <Inline md={subscriptsMd(beat.beat.caption)} />
           </p>
           {/* Verify couldn't confirm this demo: say so, quietly. (Not in isolated mode — the checks' own view.) */}
+          {/* One quiet line; the reason opens on demand. */}
           {demo.flagged && !onReady && (
-            <p className="demo-flag" role="note">
-              this demo may be inaccurate: {demo.flagged}
-            </p>
+            <details className="demo-flag">
+              <summary>this demo may be inaccurate</summary>
+              <p>{demo.flagged}</p>
+            </details>
           )}
         </header>
         <div className="demo-stage" ref={stageRef}>
@@ -211,16 +216,18 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
       </div>
 
       <div className="demo-controls">
-        <div className="row">
-          <button className="btn" onClick={onTogglePlay} aria-pressed={!playing}>
+        <div className="row transport">
+          <button className="btn ghost small" onClick={onTogglePlay} aria-pressed={!playing} title="play / pause (space)">
+            <Glyph d={playing ? "M5.5 4v8M10.5 4v8" : "M5 3.5v9l7.5-4.5z"} />
             {playing ? "pause" : "play"}
           </button>
-          <button className="btn" onClick={onRestart}>
+          <button className="btn ghost small" onClick={onRestart} title="restart (r)">
+            <Glyph d="M3.5 8a4.5 4.5 0 1 0 1.3-3.2M3.5 3v2.5H6" />
             restart
           </button>
           {dirty && (
             <button
-              className="btn"
+              className="btn ghost small"
               title="put back the values this paragraph uses"
               onClick={() => {
                 setEdits({});
@@ -232,7 +239,7 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
           )}
         </div>
 
-        {(showSetup || demo.controls.length > 0) && (
+        {(showSetup || rows.length > 0) && (
           <div className="controls-grid">
             {showSetup && (
               <label className="control setup">
@@ -254,7 +261,14 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
                 </select>
               </label>
             )}
-            {demo.controls.map((c) => (
+            {rows.map((c) => (
+              <ControlView key={c.id} spec={c} value={params[c.id]} onChange={(v) => setParam(c.id, v)} />
+            ))}
+          </div>
+        )}
+        {toggles.length > 0 && (
+          <div className="controls-toggles">
+            {toggles.map((c) => (
               <ControlView key={c.id} spec={c} value={params[c.id]} onChange={(v) => setParam(c.id, v)} />
             ))}
           </div>
@@ -265,7 +279,7 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
             {demo.readouts.map((r) => (
               <div key={r.id} className="readout">
                 <dt>
-                  <Inline md={r.label} />
+                  <Inline md={quietCase(r.label, true)} />
                 </dt>
                 <ReadoutValue id={r.id} value={readouts[r.id]} />
               </div>
@@ -276,6 +290,13 @@ function BeatView(props: Props & { beat: BeatRef; fade: boolean }) {
     </section>
   );
 }
+
+/** A 12px transport glyph, drawn like the ui icons (1.5px round strokes). */
+const Glyph = ({ d }: { d: string }) => (
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <path d={d} />
+  </svg>
+);
 
 function MissingDemo({ name, onError }: { name: string; onError?: (e: unknown) => void }) {
   useEffect(() => {
@@ -307,6 +328,21 @@ function subscriptsMd(md: string): string {
     .join("");
 }
 
+/**
+ * The pane sets its titles and labels in lower case. Only plain capitalised words are lowered ("Gambler's" →
+ * "gambler's"), so acronyms (BN, RMS), code names (ChainedHashTable, LayerNorm), numerals (II) and math keep
+ * their case; so does code. `firstOnly`: just a label's opening word (the rest is as written).
+ */
+export function quietCase(md: string, firstOnly = false): string {
+  const word = /(?<![\p{L}\p{N}_\\])(\p{Lu})(\p{Ll}+)(?![\p{L}\p{N}_])/gu;
+  const parts = md.split(/(\$[^$]*\$|`[^`]*`)/);
+  if (firstOnly) {
+    parts[0] = parts[0].replace(/^(\s*)(\p{Lu})(\p{Ll}+)(?![\p{L}\p{N}_])/u, (_, sp: string, a: string, b: string) => sp + a.toLowerCase() + b);
+    return parts.join("");
+  }
+  return parts.map((part) => (part.startsWith("$") || part.startsWith("`") ? part : part.replace(word, (_, a: string, b: string) => a.toLowerCase() + b))).join("");
+}
+
 /** Label text without $…$ math markup, for screen readers. */
 const plainLabel = (md: string) => md.replace(/\$([^$]*)\$/g, (_, m: string) => m.replace(/[\\{}]/g, "").replace(/_/g, " ")).trim();
 
@@ -317,8 +353,8 @@ function ControlView({ spec, value, onChange }: { spec: ControlSpec; value: Para
     return (
       <label className="control">
         <span className="control-label">
-          <Inline md={subscriptsMd(spec.label)} />
-        </span>
+        <Inline md={quietCase(subscriptsMd(spec.label), true)} />
+      </span>
         <input type="range" className="range" aria-label={plainLabel(spec.label)} aria-valuetext={`${v.toFixed(decimals)}${spec.unit ? ` ${spec.unit}` : ""}`} min={spec.min} max={spec.max} step={spec.step} value={v} onChange={(e) => onChange(Number(e.target.value))} />
         <span className="control-value">
           {v.toFixed(decimals)}
@@ -332,16 +368,16 @@ function ControlView({ spec, value, onChange }: { spec: ControlSpec; value: Para
       <label className="control toggle">
         <input type="checkbox" className="check" aria-label={plainLabel(spec.label)} checked={Boolean(value)} onChange={(e) => onChange(e.target.checked)} />
         <span className="control-label">
-          <Inline md={subscriptsMd(spec.label)} />
-        </span>
+        <Inline md={quietCase(subscriptsMd(spec.label), true)} />
+      </span>
       </label>
     );
   }
   return (
     <label className="control">
       <span className="control-label">
-          <Inline md={subscriptsMd(spec.label)} />
-        </span>
+        <Inline md={quietCase(subscriptsMd(spec.label), true)} />
+      </span>
       <select className="select" aria-label={plainLabel(spec.label)} value={String(value ?? spec.options[0]?.value)} onChange={(e) => onChange(e.target.value)}>
         {spec.options.map((o) => (
           <option key={o.value} value={o.value}>
@@ -359,25 +395,28 @@ export function DemoTitleRow({ beat, step, onShowInText, pinned, onTogglePin, fo
   return (
     <div className="demo-title-row">
       <h2 className="demo-title">
-        <Inline md={beat.demo.title} />
+        <Inline md={quietCase(beat.demo.title)} />
       </h2>
       <span className="spacer" />
       {step && (step.onPrev || step.onNext) && <StepNav step={step} />}
-      {onShowInText && (
-        <button className="btn icon ghost" onClick={onShowInText} aria-label="Show in text" title="show this paragraph in the text">
-          <Locate />
-        </button>
-      )}
-      {onTogglePin && (
-        <button className="btn icon ghost" onClick={onTogglePin} aria-pressed={pinned} aria-label="Pin demo" title={pinned ? "unpin: follow the text again (h)" : "pin: keep this demo while scrolling (h)"}>
-          <Pin />
-        </button>
-      )}
-      {onToggleFocus && (
-        <button className="btn icon ghost" onClick={onToggleFocus} aria-pressed={focused} aria-label={focused ? "Exit focus" : "Focus on demo"} title={focused ? "back to reading (esc)" : "focus on the demo (f)"}>
-          {focused ? <Collapse /> : <Expand />}
-        </button>
-      )}
+      {/* Secondary tools: quiet until the pane is hovered or focused (always shown when on, and on touch). */}
+      <span className="demo-tools">
+        {onShowInText && (
+          <button className="btn icon ghost" onClick={onShowInText} aria-label="Show in text" title="show this paragraph in the text">
+            <Locate />
+          </button>
+        )}
+        {onTogglePin && (
+          <button className="btn icon ghost" onClick={onTogglePin} aria-pressed={pinned} aria-label="Pin demo" title={pinned ? "unpin: follow the text again (h)" : "pin: keep this demo while scrolling (h)"}>
+            <Pin />
+          </button>
+        )}
+        {onToggleFocus && (
+          <button className="btn icon ghost" onClick={onToggleFocus} aria-pressed={focused} aria-label={focused ? "Exit focus" : "Focus on demo"} title={focused ? "back to reading (esc)" : "focus on the demo (f)"}>
+            {focused ? <Collapse /> : <Expand />}
+          </button>
+        )}
+      </span>
     </div>
   );
 }

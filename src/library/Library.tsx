@@ -13,6 +13,12 @@ import { Mark } from "../ui/Brand";
 
 const demoCount = (book: string, unit: string) => planFor(`${book}/${unit}`)?.demos.length ?? 0;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/** A chapter's title without the number the list already shows ("20. Random Walks" → "Random Walks"). */
+const chapterTitle = (u: { id: string; title: string }) => {
+  if (!isNumbered(u.id) || !u.title.startsWith(u.id)) return u.title;
+  const rest = u.title.slice(u.id.length).match(/^[.:]?\s+(.+)$/);
+  return rest ? rest[1] : u.title;
+};
 
 /** First page image of a book's first built unit, for the thumbnail. */
 function useCover(book: string, unit: string | undefined) {
@@ -92,7 +98,8 @@ function PendingRow({ job }: { job: JobSummary }) {
           ) : (
             <span className="book-meta">
               <span className={`tag ${job.status}`}>{job.status}</span>
-              <span>{job.status === "failed" ? "open it to see why" : job.total ? `${job.ready} of ${job.total} demos made` : "stopped before any demo was made"}</span>
+              {" · "}
+              {job.status === "failed" ? "open it to see why" : job.total ? `${job.ready} of ${job.total} demos made` : "nothing made yet"}
             </span>
           )}
         </div>
@@ -128,7 +135,7 @@ function Continue({ library }: { library: Library }) {
   const unit = book?.units.find((u) => u.id === p?.unit);
   if (!book || !p || !unit) return null;
   const section = unit.sections.find((s) => s.id === p.section);
-  const where = [book.units.length > 1 ? (isNumbered(unit.id) ? `${unit.id}. ${unit.title}` : unit.title) : null, section && (isNumbered(section.id) ? `${section.id} ${section.title}` : section.title)]
+  const where = [book.units.length > 1 ? (isNumbered(unit.id) ? `${unit.id}. ${chapterTitle(unit)}` : unit.title) : null, section && (isNumbered(section.id) ? `${section.id} ${section.title}` : section.title)]
     .filter(Boolean)
     .join(" · ");
   const pageOf = p.pages && p.pageIndex !== undefined ? `p. ${p.page} of ${p.page === String(p.pageIndex + 1) ? p.pages : `${p.pages} pages`}` : "";
@@ -138,6 +145,7 @@ function Continue({ library }: { library: Library }) {
       <span className="continue-title">{book.title}</span>
       <span className="continue-where">
         {where}
+        {where && pageOf && " · "}
         {pageOf && <span className="continue-page">{pageOf}</span>}
       </span>
       <span className="progress" aria-label={`${Math.round(p.fraction * 100)}% through`}>
@@ -259,7 +267,8 @@ export function LibraryView({ library, notFound, health, jobs = [] }: { library:
             <PendingRow key={j.job} job={j} />
           ))}
           {books.map((b) => {
-            const multi = b.units.length > 1;
+            // A book (chapters, even just one built so far) or a paper (one unit, "paper").
+            const multi = b.units.length > 1 || (b.units.length === 1 && b.units[0].id !== "paper");
             const n = b.units.reduce((m, u) => m + demoCount(b.slug, u.id), 0);
             return (
               <li key={b.slug} className="book-row">
@@ -269,8 +278,7 @@ export function LibraryView({ library, notFound, health, jobs = [] }: { library:
                     <span className="book-title">{b.title}</span>
                     {b.subtitle && !b.title.includes(b.subtitle) && <span className="book-sub">{b.subtitle}</span>}
                     <span className="book-meta">
-                      <span>{multi ? plural(b.units.length, "chapter") : "paper"}</span>
-                      <span>{plural(n, "demo")}</span>
+                      {multi ? plural(b.units.length, "chapter") : "paper"} · {plural(n, "demo")}
                     </span>
                   </div>
                 </a>
@@ -282,7 +290,7 @@ export function LibraryView({ library, notFound, health, jobs = [] }: { library:
                         <a href={hashFor({ book: b.slug, unit: u.id })}>
                           <span className="chapter-num">{isNumbered(u.id) ? u.id : ""}</span>
                           <span className="chapter-title">
-                            <Inline md={u.title} />
+                            <Inline md={chapterTitle(u)} />
                           </span>
                           <span className="chapter-demos">{plural(demoCount(b.slug, u.id), "demo")}</span>
                         </a>

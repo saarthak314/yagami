@@ -107,7 +107,8 @@ interface Props {
   fit: Fit;
   /** Bump to flash the active paragraph's highlight. */
   flashKey: number;
-  /** Extra space kept free at the bottom (phone bottom sheet). */
+  /** Height covered at the bottom (the phone's bottom sheet): kept free at the end, and the reading line sits in
+   * the part of the pane above it. */
   bottomInset?: number;
   onPosition: (p: ReaderPosition) => void;
   onMarker: (index: number) => void;
@@ -220,10 +221,13 @@ export function Reader({ unit, markers, active, zoom, fit, flashKey, bottomInset
   const onPositionRef = useRef(onPosition);
   onPositionRef.current = onPosition;
 
+  // The part of the pane the text is read in: above the bottom sheet, when there is one.
+  const viewH = useCallback((s: HTMLElement) => Math.max(1, s.clientHeight - bottomInset), [bottomInset]);
+
   const update = useCallback(() => {
     const s = scroller.current;
     if (!s || !avail) return;
-    const line = s.scrollTop + s.clientHeight * READING_LINE;
+    const line = s.scrollTop + viewH(s) * READING_LINE;
     let activeIdx = 0;
     let best = -Infinity;
     markers.forEach((m, i) => {
@@ -240,7 +244,7 @@ export function Reader({ unit, markers, active, zoom, fit, flashKey, bottomInset
       let below = Infinity;
       markers.forEach((m, i) => {
         const top = anchorTop(m.anchor);
-        if (top > line && top < s.scrollTop + s.clientHeight && top < below) {
+        if (top > line && top < s.scrollTop + viewH(s) && top < below) {
           below = top;
           activeIdx = i;
         }
@@ -276,7 +280,7 @@ export function Reader({ unit, markers, active, zoom, fit, flashKey, bottomInset
       last.current = key;
       onPositionRef.current({ active: activeIdx, page: g?.label ?? "", pageIndex: pi, pageFrac: f, section, fraction });
     }
-  }, [avail, markers, geo, unit, yOf, anchorTop, columns, sectionStarts, sliceOf, pageIdx]);
+  }, [avail, markers, geo, unit, yOf, anchorTop, columns, sectionStarts, sliceOf, pageIdx, viewH]);
 
   // Scroll requests made before the first layout wait for it (kept as page positions, not pixels).
   const pending = useRef<{ page: PageLabel; y: number; col?: 0 | 1 } | null>(null);
@@ -287,35 +291,36 @@ export function Reader({ unit, markers, active, zoom, fit, flashKey, bottomInset
         pending.current = { page, y, col };
         return;
       }
-      s.scrollTo({ top: Math.max(0, yOf(page, y, col) - s.clientHeight * READING_LINE + 2), behavior: smooth ? "smooth" : "auto" });
+      s.scrollTo({ top: Math.max(0, yOf(page, y, col) - viewH(s) * READING_LINE + 2), behavior: smooth ? "smooth" : "auto" });
     },
-    [avail, yOf],
+    [avail, yOf, viewH],
   );
 
-  // After a relayout (zoom, fit, pane resize): put the same spot back on the reading line, and keep the
+  // After a relayout (zoom, fit, pane resize, bottom sheet): put the same spot back on the reading line, and keep the
   // horizontal centre where it was (centred the first time a page grows past the pane).
   const lastKey = useRef("");
   useLayoutEffect(() => {
     const s = scroller.current;
     if (!s || !avail) return;
-    const key = `${colW}|${fit}|${box.h}`;
+    // (The bottom sheet opening or closing moves the reading line: the same spot goes back on it.)
+    const key = `${colW}|${fit}|${box.h}|${bottomInset}`;
     if (pending.current) {
       const p = pending.current;
       pending.current = null;
-      s.scrollTop = Math.max(0, yOf(p.page, p.y, p.col) - s.clientHeight * READING_LINE + 2);
+      s.scrollTop = Math.max(0, yOf(p.page, p.y, p.col) - viewH(s) * READING_LINE + 2);
       s.scrollLeft = (s.scrollWidth - s.clientWidth) / 2;
     } else if (lastKey.current && lastKey.current !== key && point.current) {
       // Same page and column as before, whatever the new slicing (fit column splits pages, the others don't).
       const label = unit.pages[point.current.pi]?.label;
       const g = label !== undefined ? geo[sliceOf(label, point.current.col)] : undefined;
-      if (g) s.scrollTop = Math.max(0, g.top + point.current.f * g.h - s.clientHeight * READING_LINE);
+      if (g) s.scrollTop = Math.max(0, g.top + point.current.f * g.h - viewH(s) * READING_LINE);
       const wasFit = s.scrollWidth <= s.clientWidth + 1;
       s.scrollLeft = (wasFit ? 0.5 : point.current.hx) * s.scrollWidth - s.clientWidth / 2;
     }
     lastKey.current = key;
     last.current = "";
     update();
-  }, [avail, box.h, colW, fit, geo, update, yOf, sliceOf, unit]);
+  }, [avail, box.h, bottomInset, colW, fit, geo, update, yOf, sliceOf, unit, viewH]);
 
   useEffect(() => {
     const s = scroller.current;
@@ -385,7 +390,7 @@ export function Reader({ unit, markers, active, zoom, fit, flashKey, bottomInset
         const sec = sectionStarts.find((x) => x.id === id);
         if (!sec) return;
         const a = preferAnchor ? unit.anchors.find((x) => x.id === preferAnchor) : undefined;
-        const h = scroller.current?.clientHeight ?? 800;
+        const h = scroller.current ? viewH(scroller.current) : 800;
         if (a && avail && anchorTop(a) - yOf(sec.page, sec.y, sec.col) < h * 0.3 && anchorTop(a) >= yOf(sec.page, sec.y, sec.col)) scrollTo(a.page, a.y, smooth, a.column);
         else scrollTo(sec.page, sec.y, smooth, sec.col);
       },
@@ -394,7 +399,7 @@ export function Reader({ unit, markers, active, zoom, fit, flashKey, bottomInset
         if (p) scrollTo(p.label, f, false);
       },
     }),
-    [unit, scrollTo, yOf, avail, sectionStarts, anchorTop],
+    [unit, scrollTo, yOf, avail, sectionStarts, anchorTop, viewH],
   );
 
   // Flash the highlight when asked ("show in text").

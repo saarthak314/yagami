@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Library } from "../types";
 import { ApiError, continueBook, JOB_GONE, onPlan, startFix, stopJob, useModelsView, type Health, type JobSummary } from "../lib/api";
-import { isActive, phaseWord, shortReason, useJob, type JobDemo, type JobState, type JobUnit } from "../lib/job";
+import { isActive, phaseWord, shortReason, useJob, type JobDemo, type JobUnit } from "../lib/job";
 import { assetUrl, isNumbered, loadUnit, planFor } from "../lib/data";
 import { buildHash, hashFor } from "../lib/route";
 import { Check, Cross, Spinner } from "../ui/icons";
@@ -114,10 +114,30 @@ export function BuildView({ job, library, jobs, health }: { job: string; library
     }
   };
 
-  // Status line, also used for the sticky bar: "3/6 ready · 4m 12s · $0.84 so far".
-  const counts = demos.length ? (planning ? `${ready} ready · planning…` : `${ready}/${demos.length} ready${failed.length && finished ? ` · ${failed.length} ${failed.length === 1 ? "needs" : "need"} a fix` : ""}`) : null;
+  // Waiting for another build: nothing of this one has started yet.
+  const queued = outcome === "running" && !state.kind && !!state.note;
+  // The one status line (sticky): "building · 3/6 ready · 4m 12s · $0.84 so far". A fix has one demo: no counts.
+  const counts = demos.length && !isFix ? (planning ? `${ready} ready · planning…` : `${ready}/${demos.length} ready${failed.length && finished ? ` · ${failed.length} ${failed.length === 1 ? "needs" : "need"} a fix` : ""}`) : null;
+  // No "$0.00" before anything is spent (or when nothing was); on a plan it says so instead.
+  const showCost = cost > 0 || onPlan(health);
+  // One hint under the actions, for the state the run is in (the model note replaces it when it applies).
+  const hint =
+    outcome === "running"
+      ? book && pagesReady
+        ? "it keeps running if you close this tab — open the book any time."
+        : "it keeps running if you close this tab."
+      : outcome === "stopped"
+        ? "finished demos are kept — resume picks up where it stopped."
+        : outcome === "partial" && book
+          ? isFix
+            ? "still wrong? describe what you see with fix."
+            : "describe what's wrong with a failed demo and yagami revises it."
+          : null;
+  const showBlocked = wantsModel && !!blocked;
+  // The run's own reason, unless the model note already says it.
+  const reason = runError && !(showBlocked && blocked?.includes(shortReason(runError))) ? shortReason(runError) : null;
   const statusWord = {
-    running: isFix ? "fixing" : "building",
+    running: queued ? "queued" : isFix ? "fixing" : "building",
     stopped: "stopped",
     failed: "failed",
     ok: isFix ? "fixed" : "done",
@@ -151,10 +171,12 @@ export function BuildView({ job, library, jobs, health }: { job: string; library
         </span>
         {counts && <span>{counts}</span>}
         <span>{duration(elapsed)}</span>
-        <span>
-          {money(cost, health)}
-          {outcome === "running" && !(cost === 0 && onPlan(health)) ? " so far" : ""}
-        </span>
+        {showCost && (
+          <span>
+            {money(cost, health)}
+            {outcome === "running" && !(cost === 0 && onPlan(health)) ? " so far" : ""}
+          </span>
+        )}
       </div>
       <div className="library-inner">
         <a className="back" href="#/">
@@ -165,15 +187,17 @@ export function BuildView({ job, library, jobs, health }: { job: string; library
           <div className="build-head-text">
             {title ? (
               <h1 className="build-title" tabIndex={-1} ref={titleRef}>
-                {isFix ? `fixing: ${title}` : title}
+                {title}
               </h1>
             ) : (
               <span className="skel static skel-title" aria-hidden />
             )}
             <p className="build-meta">
-              {state.kind ? (
+              {queued ? (
+                <>{state.note}</>
+              ) : state.kind ? (
                 isFix ? (
-                  <>{book?.title ?? ""}</>
+                  <>{book ? `fix · ${book.title}` : "fix"}</>
                 ) : (
                   <>
                     {multi ? plural(state.units.length, "chapter") : "paper"} · {state.kind === "scanned" ? "scanned pdf" : "text pdf"}
@@ -220,39 +244,39 @@ export function BuildView({ job, library, jobs, health }: { job: string; library
                 </button>
               )}
             </div>
-            {outcome === "running" && <p className="build-hint">it keeps running if you close this tab — open the book any time.</p>}
-            {wantsModel && blocked && (
+            {reason && <p className="upload-blocked">{reason}</p>}
+            {showBlocked ? (
               <p className="upload-blocked" id="build-blocked">
                 {blocked}
                 <ConnectButton health={health} models={models} />
               </p>
+            ) : (
+              hint && <p className="build-hint">{hint}</p>
             )}
             {actionError && <p className="upload-blocked">{actionError}</p>}
           </div>
         </header>
 
         <section className="build-body" aria-busy={outcome === "running"}>
-          {state.note && outcome === "running" && <p className="upload-note">{state.note}</p>}
-          {state.units.length === 0 && outcome === "running" && <SkeletonRows n={2} />}
+          {state.note && outcome === "running" && !queued && <p className="upload-note">{state.note}</p>}
+          {state.units.length === 0 && outcome === "running" && !queued && <SkeletonRows n={2} />}
           {state.units.map((u) => {
             const own = demos.filter((d) => d.unit === u.id);
             return (
               <div key={u.id} className="build-unit">
                 {multi && <h2 className="build-unit-title">{unitTitle(book, u.id)}</h2>}
-                {!isFix && <UnitSteps u={u} demos={own.length} outcome={outcome} />}
+                {!isFix && <UnitSteps u={u} outcome={outcome} />}
                 <ul className="build-demos">
                   {own.map((d) => (
                     <DemoRow key={d.id} d={d} slug={slug} finished={finished} health={health} hasBook={!!book} />
                   ))}
-                  {!isFix && outcome === "running" && u.plan !== "done" && u.plan !== "error" && own.length === 0 && <SkeletonRows n={u.plan === "running" ? 4 : 3} asItems />}
+                  {!isFix && outcome === "running" && u.plan === "running" && own.length === 0 && <SkeletonRows n={3} asItems />}
                 </ul>
               </div>
             );
           })}
           {isFix && demos.length === 0 && outcome === "running" && <SkeletonRows n={1} asItems />}
         </section>
-
-        {finished && <FinishedSummary state={state} outcome={outcome} isFix={isFix} elapsed={elapsed} cost={cost} runError={runError} health={health} />}
       </div>
     </main>
   );
@@ -283,19 +307,27 @@ function SkeletonRows({ n, asItems = false }: { n: number; asItems?: boolean }) 
   );
 }
 
-function UnitSteps({ u, demos, outcome }: { u: JobUnit; demos: number; outcome: Outcome }) {
+/** One line per chapter for what it's doing before (or instead of) its demos; nothing once pages and plan are done. */
+function UnitSteps({ u, outcome }: { u: JobUnit; outcome: Outcome }) {
   const live = outcome === "running";
   // A step that was still going when the run ended didn't finish: show it as not done.
   const as = (s: JobUnit["pages"]): JobUnit["pages"] => (!live && s === "running" ? "pending" : s);
   const pages = as(u.pages);
   const plan = as(u.plan);
-  const pagesWord =
-    pages === "done" ? "pages ready" : pages === "error" ? "pages failed" : pages === "running" ? (u.progress ? `reading pages · ${u.progress.done}/${u.progress.total}` : "reading pages") : "pages";
-  const planWord = plan === "done" ? `plan · ${plural(demos, "demo")}` : plan === "error" ? "plan failed" : plan === "running" ? "planning demos" : "plan";
+  if (pages === "done" && plan === "done") return null;
+  const [step, word]: [JobUnit["pages"], string] =
+    pages === "error"
+      ? ["error", "pages failed"]
+      : plan === "error"
+        ? ["error", "plan failed"]
+        : pages === "running"
+          ? ["running", u.progress ? `reading pages · ${u.progress.done}/${u.progress.total}` : "reading pages"]
+          : pages === "done" && plan === "running"
+            ? ["running", "planning demos"]
+            : ["pending", live ? (pages === "done" ? "waiting to plan" : "waiting") : "not started"];
   return (
     <ul className="build-steps">
-      <StepRow step={pages} word={pagesWord} progress={pages === "running" ? u.progress : undefined} />
-      <StepRow step={plan} word={planWord} />
+      <StepRow step={step} word={word} progress={pages === "running" ? u.progress : undefined} />
     </ul>
   );
 }
@@ -327,20 +359,25 @@ function DemoRow({ d, slug, finished, health, hasBook }: { d: JobDemo; slug: str
     setFixing(false);
     requestAnimationFrame(() => opener.current?.focus());
   };
+  const canFix = d.phase === "fail" && finished && hasBook;
+  // Words only where they say something: what an active demo is doing, or that it was stopped.
+  // Ready / failed / queued are the glyph and the row's tone (spoken for screen readers).
+  const shown = active || (finished && isActive(d));
   return (
     <li className={`build-demo phase-${d.phase}${active ? " active" : ""}${finished && isActive(d) ? " halted" : ""}`}>
       <span className="glyph">{d.phase === "pass" ? <Check /> : d.phase === "fail" ? <Cross /> : <span className="dot" />}</span>
       <span className="build-demo-title">{d.title}</span>
-      <span className="build-demo-state">
-        {word}
-        {d.round > 0 && active && <span className="attempt"> · attempt {d.round + 1}</span>}
-      </span>
-      {d.phase === "fail" && d.detail && <span className="build-reason">{shortReason(d.detail)}</span>}
-      {d.phase === "fail" && finished && hasBook && !fixing && (
+      {canFix && !fixing ? (
         <button ref={opener} className="btn small" onClick={() => setFixing(true)} disabled={!!blocked} aria-describedby={blocked ? "build-blocked" : undefined} title={blocked ? undefined : "describe what's wrong and yagami revises it"}>
-          fix
+          fix<span className="sr-only"> {d.title} (failed)</span>
         </button>
+      ) : (
+        <span className="build-demo-state">
+          {shown ? word : <span className="sr-only">{word}</span>}
+          {d.round > 1 && active && <span className="attempt"> · attempt {d.round + 1}</span>}
+        </span>
       )}
+      {d.phase === "fail" && <span className="build-reason">{shortReason(d.detail) || "failed"}</span>}
       {fixing && (
         <form
           className="fix-form"
@@ -390,63 +427,5 @@ function DemoRow({ d, slug, finished, health, hasBook }: { d: JobDemo; slug: str
         </form>
       )}
     </li>
-  );
-}
-
-function FinishedSummary({
-  state,
-  outcome,
-  isFix,
-  elapsed,
-  cost,
-  runError,
-  health,
-}: {
-  state: JobState;
-  outcome: Outcome;
-  isFix: boolean;
-  elapsed: number;
-  cost: number;
-  runError: string | null;
-  health: Health | null | undefined;
-}) {
-  const demos = state.demos;
-  const ready = demos.filter((d) => d.phase === "pass").length;
-  const failed = demos.filter((d) => d.phase === "fail").length;
-  const head =
-    outcome === "stopped"
-      ? demos.length
-        ? `stopped · ${ready}/${demos.length} ready`
-        : "stopped before any demo was made"
-      : outcome === "failed"
-        ? "the build failed"
-        : isFix
-          ? outcome === "ok"
-            ? "fixed"
-            : "not fixed"
-          : `${ready}/${demos.length} demos ready${failed ? ` · ${failed} ${failed === 1 ? "needs" : "need"} a fix` : ""}`;
-  // Same clock as the status bar (wall time, including any wait in the queue).
-  const time = elapsed || (state.done ? state.done.seconds * 1000 : 0);
-  const hint =
-    outcome === "stopped"
-      ? "finished work is kept — resume continues where it left off."
-      : outcome === "failed"
-        ? null
-        : failed
-          ? isFix
-            ? "still wrong? describe what you see with fix."
-            : "describe what's wrong with a failed demo and yagami revises it."
-          : null;
-  return (
-    <footer className="build-summary">
-      <p className={`build-done ${outcome}`}>
-        <span className="glyph">{outcome === "ok" ? <Check /> : outcome === "stopped" ? <span className="dash" aria-hidden /> : <Cross />}</span>
-        <span>{head}</span>
-        <span className="muted">· {duration(time)}</span>
-        <span className="muted">· {money(cost, health)}</span>
-      </p>
-      {runError && <p className="upload-blocked">{shortReason(runError)}</p>}
-      {hint && <p className="upload-note">{hint}</p>}
-    </footer>
   );
 }

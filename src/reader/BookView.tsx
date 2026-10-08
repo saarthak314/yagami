@@ -11,7 +11,7 @@ import { Inline } from "../lib/inline";
 import { Reader, isTwoColumn, textCrop, type Fit, type Marker, type ReaderHandle, type ReaderPosition } from "./Reader";
 import { cleanTitle } from "../lib/titles";
 import { Contents } from "./Contents";
-import { DemoPane, StepNav } from "../demo/DemoPane";
+import { DemoPane, StepNav, quietCase } from "../demo/DemoPane";
 import { Brand } from "../ui/Brand";
 import { HelpButton } from "../ui/Help";
 import { ThemeMenu } from "../ui/ThemeMenu";
@@ -150,7 +150,18 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
   const fitDefault: Fit = narrow ? (twoCol ? "column" : "text") : cropWidth < 0.75 ? "text" : "page";
   const fit: Fit = fitPref === "column" && !twoCol ? fitDefault : (fitPref ?? fitDefault);
   const [focus, setFocus] = useState(false);
-  const [sheetOpen, setSheetOpen] = useState(false);
+  const [sheetOpen, setSheetOpenState] = useState(false);
+  // Phone sheet height (closed: its bar; open: most of the screen). The reader reads above it.
+  const [sheetH, setSheetH] = useState(0);
+  const sheetObserver = useRef<ResizeObserver | null>(null);
+  const sheetRef = useCallback((el: HTMLElement | null) => {
+    sheetObserver.current?.disconnect();
+    sheetObserver.current = null;
+    if (!el) return setSheetH(0);
+    const ro = new ResizeObserver(() => setSheetH(Math.round(el.getBoundingClientRect().height)));
+    ro.observe(el);
+    sheetObserver.current = ro;
+  }, []);
 
   // Demo state.
   const reader = useRef<ReaderHandle>(null);
@@ -181,6 +192,21 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
   const hasDemos = beats.length > 0;
   const shown = Math.min(frozen ?? pinned ?? held ?? pos.active, Math.max(0, beats.length - 1));
   const current = beats[shown] ?? null;
+
+  // Opening or closing the sheet moves the reading line (it sits above the sheet): keep the demo shown, and once
+  // the open sheet has its height, bring that step's paragraph into the strip of text left above it.
+  const setSheetOpen = useCallback(
+    (v: boolean | ((o: boolean) => boolean)) => {
+      setHeld((h) => h ?? shown);
+      setSheetOpenState(v);
+    },
+    [shown],
+  );
+  const currentAnchor = current?.anchor.id;
+  useEffect(() => {
+    if (narrow && sheetOpen && currentAnchor) reader.current?.scrollToAnchor(currentAnchor, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sheetH]);
 
   // Steps of the current demo, in reading order.
   const steps = useMemo(() => (current ? beats.map((b, i) => (b.demo.id === current.demo.id ? i : -1)).filter((i) => i >= 0) : []), [beats, current]);
@@ -278,6 +304,20 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
     setFlashKey((k) => k + 1);
   }, [current, focus, narrow]);
 
+  // The control last pressed with the pointer: it keeps focus without showing it, so space there should play /
+  // pause like anywhere else rather than press it again (a marker, a step arrow, the contents button).
+  const pressed = useRef<Element | null>(null);
+  useEffect(() => {
+    const down = (e: PointerEvent) => (pressed.current = (e.target as Element).closest?.("button, input, summary, a") ?? null);
+    const focusIn = (e: FocusEvent) => e.target !== pressed.current && (pressed.current = null);
+    window.addEventListener("pointerdown", down, true);
+    window.addEventListener("focusin", focusIn);
+    return () => {
+      window.removeEventListener("pointerdown", down, true);
+      window.removeEventListener("focusin", focusIn);
+    };
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (modal || help || e.metaKey || e.ctrlKey || e.altKey || typing(e.target)) return;
@@ -288,7 +328,9 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
         else if (narrow && sheetOpen) setSheetOpen(false);
         return;
       }
-      const onControl = (e.target as HTMLElement).closest?.("button, input, select, a");
+      // Space presses a control reached with the keyboard (sliders take no space, so they don't count).
+      const control = (e.target as HTMLElement).closest?.("button, input:not([type=range]), select, a, summary");
+      const onControl = control && control !== pressed.current;
       if (k === "t") setTocOpen((v) => !v);
       else if (k === "+" || k === "=") zoomBy(1);
       else if (k === "-" || k === "_") zoomBy(-1);
@@ -429,7 +471,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
         </button>
         {!narrow && hasDemos && (
           <button
-            className="btn icon ghost"
+            className="btn icon ghost dock-toggle"
             aria-pressed={!demoHidden}
             onClick={() => {
               setFocus(false);
@@ -491,7 +533,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
             zoom={zoom}
             fit={fit}
             flashKey={flashKey}
-            bottomInset={narrow && showDock ? 72 : 0}
+            bottomInset={narrow && showDock ? sheetH : 0}
             onPosition={setPos}
             onUserScroll={() => setHeld(null)}
             onMarker={(i) => {
@@ -521,7 +563,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
         )}
 
         {showDock && paneProps && narrow && (
-          <aside className={`sheet${sheetOpen ? " open" : ""}`} aria-label="Demo">
+          <aside className={`sheet${sheetOpen ? " open" : ""}`} aria-label="Demo" ref={sheetRef}>
             <div
               className="sheet-bar"
               onPointerDown={(e) => {
@@ -555,7 +597,7 @@ export function BookView({ library, book: slug, unit: unitId, target, onNavigate
               >
                 <span className="sheet-text">
                   <span className="demo-title">
-                    <Inline md={paneProps.beat.demo.title} />
+                    <Inline md={quietCase(paneProps.beat.demo.title)} />
                   </span>
                   {!sheetOpen && (
                     <span className="sheet-caption">

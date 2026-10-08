@@ -1,5 +1,6 @@
 // Routes: `#/` the library, `#/<book>/<unit>/<section>` a book, `#/build/<job>` a
-// build. The command palette (⌘K or /) and the help panel (?) work everywhere.
+// build, `#/connect` setting up a model (where a fresh install lands once per session).
+// The command palette (⌘K or /) and the help panel (?) work everywhere.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MODELS_CHANGED, health as fetchHealth, type Health } from "./lib/api";
@@ -7,7 +8,8 @@ import { useJobs } from "./lib/job";
 import { BuildView } from "./build/BuildView";
 import type { Library } from "./types";
 import { loadLibrary } from "./lib/data";
-import { hashFor, parseHash, type Route } from "./lib/route";
+import { CONNECT_HASH, connectSeen, hashFor, markConnectSeen, parseHash, type Route } from "./lib/route";
+import { ConnectPage } from "./connect/ConnectPage";
 import type { Target } from "./lib/search";
 import { load, progressKey, type Progress } from "./lib/store";
 import { LibraryView } from "./library/Library";
@@ -77,6 +79,22 @@ export function App() {
     return () => window.removeEventListener(MODELS_CHANGED, on);
   }, []);
   const jobs = useJobs(!!health);
+
+  // A fresh install: the build server is there but no model is set up. The first time the library
+  // opens in this session, go to the connect page instead (replacing the entry: back doesn't loop).
+  // Decided once, on the first health answer — never later (removing a key doesn't send you there),
+  // never from a book or a build, never on a static export (no server: health is null).
+  const routeRef = useRef(route);
+  routeRef.current = route;
+  const onboardChecked = useRef(false);
+  useEffect(() => {
+    if (health === undefined || onboardChecked.current) return;
+    onboardChecked.current = true;
+    const r = routeRef.current;
+    if (!health || health.credentials || r.book || r.job || r.connect || connectSeen()) return;
+    markConnectSeen();
+    location.replace(CONNECT_HASH);
+  }, [health]);
   // A build adds books and pages as it goes: reload the index when that changes.
   const jobsKey = jobs.map((j) => `${j.slug}:${j.pagesReady}:${j.status}:${j.ready}:${j.total}`).join("|");
   const firstJobs = useRef(true);
@@ -127,6 +145,14 @@ export function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [setPalette]);
+
+  if (route.connect)
+    return (
+      <>
+        <ConnectPage health={health} help={help} onHelp={setHelp} />
+        {palette && library && <Palette library={library} onGo={navigate} onClose={() => setPalette(false)} />}
+      </>
+    );
 
   if (!library) {
     return (

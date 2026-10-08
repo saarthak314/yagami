@@ -174,6 +174,7 @@ export function Uploader({ health, prominent = false }: { health: Health | null 
   const reset = () => {
     abort.current?.abort();
     setSt({ s: "idle" });
+    setAnnounce("");
   };
   // Escape closes the card (but not while a build is starting).
   const onCardKey = (e: React.KeyboardEvent) => {
@@ -345,9 +346,14 @@ function Ready({
           <h2 className="upload-title" tabIndex={-1} ref={heading}>
             {info.title}
           </h2>
-          {info.author && <span className="upload-author">{info.author}</span>}
+          {info.author && (
+            <span className="upload-author" title={info.author}>
+              {info.author}
+            </span>
+          )}
           <span className="upload-meta">
-            {info.pages} pages · {multi ? `${info.units.length} chapters` : "paper"} · {info.kind === "scanned" ? "scanned pdf" : "text pdf"}
+            {info.pages} pages{multi ? ` · ${info.units.length} chapters` : ""} · {info.kind === "scanned" ? "scanned pdf" : "text pdf"}
+            {existing && !fullyBuilt ? " · in your library" : ""}
           </span>
         </div>
         <button className="btn icon ghost" aria-label="close" title="close (esc)" onClick={reset} disabled={st.starting}>
@@ -381,13 +387,15 @@ function Ready({
                   </button>
                 )}
               </legend>
-              <ul className="picker-list">
+              <ul className={`picker-list${existing ? " has-built" : ""}${info.units.length > 8 ? " scroll" : ""}`}>
                 {info.units.map((u) => (
                   <li key={u.id}>
                     <label className={`${u.built || picked.has(u.id) ? "on" : ""}${u.built ? " locked" : ""}`}>
                       <input type="checkbox" className="check" checked={u.built || picked.has(u.id)} disabled={u.built} onChange={() => toggle(u.id)} />
-                      <span className="picker-title">{chapterLabel(u)}</span>
-                      <span className="picker-built">{u.built ? "built" : ""}</span>
+                      <span className="picker-title" title={chapterLabel(u)}>
+                        {chapterLabel(u)}
+                      </span>
+                      {existing && <span className="picker-built">{u.built ? "built" : ""}</span>}
                       <span className="picker-pages">
                         pp. {u.pages[0]}–{u.pages[1]}
                       </span>
@@ -397,14 +405,6 @@ function Ready({
               </ul>
             </fieldset>
           )}
-          <p className="upload-note">
-            {existing && !multi
-              ? "already in your library — continuing builds only what's missing. "
-              : existing
-                ? "built chapters stay as they are. "
-                : ""}
-            {costNote(health, units > 0 || !multi ? Math.max(1, units) : 0, multi ? plural(units, existing ? "new chapter" : "chapter") : "this paper")}
-          </p>
           {blocked && (
             <p className="upload-blocked" role="alert">
               {blocked}
@@ -436,6 +436,7 @@ function Ready({
                 open it
               </a>
             )}
+            <span className="upload-hint">{costNote(health, units > 0 || !multi ? Math.max(1, units) : 0, multi ? plural(units, existing ? "new chapter" : "chapter") : "this paper")}</span>
           </div>
         </>
       )}

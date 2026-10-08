@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 
 const SHORTCUTS: [string, string][] = [
-  ["next / previous step in the text", "j  k"],
+  ["next / previous step", "j  k"],
   ["play / pause", "space"],
   ["restart", "r"],
   ["pin demo", "h"],
@@ -35,7 +35,12 @@ export function HelpButton({ open, onOpenChange, context = "reader" }: { open: b
       opener.current?.focus();
     };
     window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
+    return () => {
+      window.removeEventListener("keydown", esc);
+      // However it closed (Escape here or in the app, "?", the button), focus left with the panel: give it back to the opener.
+      const at = document.activeElement;
+      if (!at || at === document.body || wrap.current?.contains(at)) opener.current?.focus();
+    };
   }, [open, onOpenChange]);
 
   useEffect(() => {
@@ -49,7 +54,7 @@ export function HelpButton({ open, onOpenChange, context = "reader" }: { open: b
 
   return (
     <div className="help-wrap" ref={wrap}>
-      <button ref={opener} className="btn icon" aria-expanded={open} onClick={() => onOpenChange(!open)} aria-label="Keyboard shortcuts" title="shortcuts (?)">
+      <button ref={opener} className="btn icon ghost help-btn" aria-expanded={open} onClick={() => onOpenChange(!open)} aria-label="Keyboard shortcuts" title="shortcuts (?)">
         ?
       </button>
       {open && (

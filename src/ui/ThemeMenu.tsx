@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { THEMES, type ThemeId } from "../theme/themes";
 import { savedTheme, setTheme } from "../theme/apply";
+import { Check } from "./icons";
 
 const ThemeIcon = () => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -46,7 +47,7 @@ export function ThemeMenu() {
     <div className="theme-wrap" ref={wrap}>
       <button
         ref={opener}
-        className="btn icon"
+        className="btn icon ghost"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="Theme"
@@ -90,7 +91,11 @@ export function ThemeMenu() {
                 <span style={{ background: t.accent }} />
               </span>
               <span className="theme-name">{t.label}</span>
-              {t.id === current && <span className="theme-check" aria-hidden>✓</span>}
+              {t.id === current && (
+                <span className="theme-check" aria-hidden>
+                  <Check />
+                </span>
+              )}
             </li>
           ))}
         </ul>

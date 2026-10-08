@@ -245,9 +245,9 @@ export const openModels = () => window.dispatchEvent(new Event(OPEN_MODELS));
 /** How each provider is named: in the panel, in the header, and when it's chosen but not set up. */
 export const PROVIDERS: Record<ProviderId, { name: string; short: string; missing: string; fix: string }> = {
   anthropic: { name: "anthropic api key", short: "anthropic key", missing: "no anthropic api key added", fix: "add a key or switch" },
-  "claude-sub": { name: "claude subscription", short: "claude plan", missing: "claude subscription isn't logged in", fix: "log in or switch" },
+  "claude-sub": { name: "claude plan", short: "claude plan", missing: "claude plan isn't logged in", fix: "log in or switch" },
   openai: { name: "openai api key", short: "openai key", missing: "no openai api key added", fix: "add a key or switch" },
-  "openai-sub": { name: "chatgpt subscription", short: "chatgpt plan", missing: "chatgpt subscription isn't logged in", fix: "log in or switch" },
+  "openai-sub": { name: "chatgpt plan", short: "chatgpt plan", missing: "chatgpt plan isn't logged in", fix: "log in or switch" },
 };
 const isProvider = (id: string | undefined): id is ProviderId => !!id && id in PROVIDERS;
 

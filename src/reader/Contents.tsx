@@ -101,7 +101,7 @@ export function Contents({ title, unitKey, unit, sections, current, activeDemo, 
         {opening.length > 0 && (
           <div className={`toc-section toc-opening${listedCurrent ? "" : " current"}`}>
             <button className="toc-link" onClick={() => start && onDemo(start)} aria-current={listedCurrent ? undefined : "location"}>
-              <span className="toc-text">Beginning</span>
+              <span className="toc-text">beginning</span>
               <span className="toc-count" title={`${opening.length} demo${opening.length > 1 ? "s" : ""}`}>
                 {opening.length}
               </span>
