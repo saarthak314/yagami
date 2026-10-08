@@ -37,7 +37,8 @@ const USAGE = [
   `       ${color.muted('yagami fix "label smoothing" "legend too big"')}`,
   "",
   `  ${color.dim("while it runs: o open · d details · q quit")}`,
-  `  ${color.dim("needs ANTHROPIC_API_KEY · a paper costs a few dollars")}`,
+  `  ${color.dim("models: an anthropic or openai key, or a claude or chatgpt subscription")}`,
+  `  ${color.dim("(YAGAMI_PROVIDER = anthropic · claude-sub · openai · openai-sub)")}`,
 ].join("\n");
 
 const HELP = `\n${BRAND}\n\n${USAGE}\n`;
@@ -56,9 +57,14 @@ const has = (bin: string) => spawnSync("which", [bin]).status === 0;
 // ---------------------------------------------------------------------------
 
 async function preflightModels() {
-  const profile = path.join(os.homedir(), ".config", "anthropic");
-  const creds = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || (fs.existsSync(profile) && fs.readdirSync(profile).length > 0);
-  if (!creds) fail("no anthropic credentials — set ANTHROPIC_API_KEY (or run: ant auth login)");
+  const { providerStatus } = await import("../scripts/lib/claude");
+  let st: ReturnType<typeof providerStatus>;
+  try {
+    st = providerStatus();
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  if (!st.ready) fail(`no model access (${st.provider}) — ${st.how}`);
   const { chromium } = await import("playwright");
   if (!fs.existsSync(chromium.executablePath())) fail("headless chromium is missing — run: npx playwright install chromium");
 }

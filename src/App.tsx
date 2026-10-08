@@ -2,7 +2,7 @@
 // build. The command palette (⌘K or /) and the help panel (?) work everywhere.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { health as fetchHealth, type Health } from "./lib/api";
+import { MODELS_CHANGED, health as fetchHealth, type Health } from "./lib/api";
 import { useJobs } from "./lib/job";
 import { BuildView } from "./build/BuildView";
 import type { Library } from "./types";
@@ -16,6 +16,7 @@ import { Palette } from "./ui/Palette";
 import { Brand } from "./ui/Brand";
 import { HelpButton } from "./ui/Help";
 import { ThemeMenu } from "./ui/ThemeMenu";
+import { ModelMenu } from "./ui/ModelMenu";
 import { Search } from "./ui/icons";
 
 /** Which unit and where in it a route opens: the URL first, then saved progress, then the start. */
@@ -70,6 +71,10 @@ export function App() {
   const [health, setHealth] = useState<Health | null | undefined>(undefined);
   useEffect(() => {
     void fetchHealth().then(setHealth);
+    // The model panel changed the provider, a key or a login: what building needs may have changed.
+    const on = () => void fetchHealth().then(setHealth);
+    window.addEventListener(MODELS_CHANGED, on);
+    return () => window.removeEventListener(MODELS_CHANGED, on);
   }, []);
   const jobs = useJobs(!!health);
   // A build adds books and pages as it goes: reload the index when that changes.
@@ -161,6 +166,7 @@ export function App() {
         <span className="search-label">search</span>
         <kbd>⌘K</kbd>
       </button>
+      {health && <ModelMenu health={health} />}
       <ThemeMenu />
       <HelpButton open={help} onOpenChange={setHelp} context="library" />
     </header>

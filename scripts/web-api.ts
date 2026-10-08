@@ -64,9 +64,148 @@ class HttpError extends Error {
 const has = (bin: string) => spawnSync("which", [bin]).status === 0;
 const id = (prefix: string) => `${prefix}${Date.now().toString(36)}${crypto.randomBytes(3).toString("hex")}`;
 
-function credentials(): boolean {
-  const profile = path.join(os.homedir(), ".config", "anthropic");
-  return !!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || (fs.existsSync(profile) && fs.readdirSync(profile).length > 0));
+// --- Model access (the site's model panel) ---------------------------------------
+//
+// Providers: anthropic / openai (API keys, pasted here or from the environment) and claude-sub /
+// openai-sub (subscriptions, logged in through the official CLIs). A login runs the CLI's own flow:
+// it prints a sign-in URL the page opens; Codex finishes by itself (its callback is on localhost),
+// Claude shows a code after sign-in that the page sends back to the CLI.
+
+const PROVIDER_IDS = ["anthropic", "claude-sub", "openai", "openai-sub"] as const;
+type ProviderName = (typeof PROVIDER_IDS)[number];
+
+interface Login {
+  provider: "claude-sub" | "openai-sub";
+  child: ChildProcess;
+  url: string | null;
+  /** Claude: waiting for the code shown after sign-in. */
+  needsCode: boolean;
+  status: "waiting" | "done" | "failed";
+  error?: string;
+  /** The last pasted code was refused (the CLI waits for another). */
+  codeError?: string;
+  out: string;
+  /** Codex: the temporary CODEX_HOME the login writes to (copied over the real one only on success). */
+  tmpHome?: string;
+}
+
+const codexHome = () => process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+
+/** Stop a login CLI and whatever it started (`claude` is a launcher: killing only it orphans the real process). */
+function stopLogin(l: Login) {
+  try {
+    if (l.child.pid) process.kill(-l.child.pid, "SIGTERM");
+  } catch {
+    l.child.kill("SIGTERM");
+  }
+}
+let login: Login | null = null;
+
+/** CLI output without colours or terminal hyperlinks. */
+const plain = (t: string) => t.replace(/\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+
+function loginView() {
+  return login
+    ? { provider: login.provider, url: login.url, needsCode: login.needsCode, status: login.status, ...(login.error ? { error: login.error } : {}), ...(login.codeError ? { codeError: login.codeError } : {}) }
+    : null;
+}
+
+async function modelsView() {
+  const { providersOverview, resetProvider } = await import("./lib/claude");
+  // Re-resolve "automatic": a login or logout outside the page (codex logout, claude auth login in a
+  // terminal) changes which provider is first set up, and the resolved one is cached.
+  resetProvider();
+  return { ...providersOverview(), login: loginView() };
+}
+
+/**
+ * Why a login ended without working, in a line: the refused code (Claude exits after one), else the
+ * CLI's last error-looking line. Never the sign-in URL or the "paste code" prompt.
+ */
+function loginFailure(l: Login): string {
+  if (l.codeError) return `${l.codeError} — log in again for a new code`;
+  const lines = plain(l.out)
+    .split(/\r?\n|\r/)
+    .map((x) => x.trim())
+    .filter((x) => x && !/https?:\/\//.test(x) && !/paste code/i.test(x));
+  const bad = lines.filter((x) => /error|fail|invalid|expired|denied|cancel/i.test(x));
+  return (bad.at(-1) ?? lines.at(-1) ?? "").toLowerCase().slice(0, 200) || "the login didn't finish";
+}
+
+/** Start a subscription login; resolves with the sign-in URL once the CLI prints it. */
+async function startLogin(provider: "claude-sub" | "openai-sub"): Promise<void> {
+  if (login?.status === "waiting") stopLogin(login);
+  const env: NodeJS.ProcessEnv = { ...process.env, BROWSER: "true" }; // the page opens the URL; the CLI shouldn't open another tab
+  delete env.ANTHROPIC_API_KEY; // a Claude login must not fall back to the API key
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  // `codex login` signs the current account out as soon as it starts: log in into a temporary home
+  // and copy the result over only when it succeeds, so a cancelled login keeps the old one.
+  const tmpHome = provider === "openai-sub" ? fs.mkdtempSync(path.join(os.tmpdir(), "yagami-codex-")) : undefined;
+  if (tmpHome) env.CODEX_HOME = tmpHome;
+  const child = provider === "claude-sub" ? spawn("claude", ["auth", "login", "--claudeai"], { env, stdio: ["pipe", "pipe", "pipe"], detached: true }) : spawn("codex", ["login"], { env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+  const l: Login = { provider, child, url: null, needsCode: false, status: "waiting", out: "", tmpHome };
+  login = l;
+  const onData = (b: Buffer) => {
+    l.out = (l.out + plain(b.toString())).slice(-8000);
+    l.url ??= /https:\/\/[^\s"'<>\]]+/.exec(l.out)?.[0] ?? null;
+    if (provider === "claude-sub" && /paste code/i.test(l.out)) l.needsCode = true;
+  };
+  child.stdout?.on("data", onData);
+  child.stderr?.on("data", onData);
+  child.on("error", (e) => {
+    l.status = "failed";
+    l.error = (e as NodeJS.ErrnoException).code === "ENOENT" ? `${provider === "claude-sub" ? "claude code" : "codex"} is not installed` : e.message;
+  });
+  child.on("exit", async (code) => {
+    if (l.tmpHome) {
+      const got = path.join(l.tmpHome, "auth.json");
+      if (code === 0 && l.status === "waiting" && fs.existsSync(got)) {
+        fs.mkdirSync(codexHome(), { recursive: true });
+        fs.copyFileSync(got, path.join(codexHome(), "auth.json"));
+        fs.chmodSync(path.join(codexHome(), "auth.json"), 0o600);
+      }
+      fs.rmSync(l.tmpHome, { recursive: true, force: true });
+    }
+    if (l.status !== "waiting") return;
+    const { resetProvider } = await import("./lib/claude");
+    resetProvider();
+    const ok = (await modelsView()).providers.find((x) => x.id === provider)?.ready;
+    l.status = code === 0 && ok ? "done" : "failed";
+    if (l.status === "failed") l.error = loginFailure(l);
+  });
+  for (let i = 0; i < 100 && !l.url && l.status === "waiting"; i++) await new Promise((r) => setTimeout(r, 100));
+  if (!l.url && l.status === "waiting") {
+    stopLogin(l);
+    l.status = "failed";
+    l.error = "the login didn't start (no sign-in link)";
+  }
+}
+
+/** A pasted API key works: a free model-list request (401/403 = rejected). */
+async function checkKey(k: "anthropic" | "openai", key: string): Promise<void> {
+  let r: Response;
+  try {
+    r =
+      k === "anthropic"
+        ? await fetch(`${(process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com").replace(/\/+$/, "")}/v1/models?limit=1`, { headers: { "x-api-key": key, "anthropic-version": "2023-06-01" }, signal: AbortSignal.timeout(15000) })
+        : await fetch(`${(process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/+$/, "")}/models`, { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15000) });
+  } catch {
+    throw new HttpError(502, "couldn't reach the api to check the key — check your connection");
+  }
+  if (r.status === 401 || r.status === 403) throw new HttpError(400, "that key was rejected — check it and try again");
+  if (!r.ok) throw new HttpError(502, `couldn't check the key (the api answered ${r.status})`);
+}
+
+/** Model access on this server: the active provider (scripts/lib/claude.ts), whether it is set up, and how. */
+async function models(): Promise<{ ready: boolean; provider: string; billing: "api" | "subscription"; how?: string }> {
+  const { providerStatus, billing, resetProvider } = await import("./lib/claude");
+  resetProvider(); // as in modelsView: logins can change outside the page
+  try {
+    const st = providerStatus();
+    return { ready: st.ready, provider: st.provider, billing: billing(), how: st.how };
+  } catch (e) {
+    return { ready: false, provider: "unknown", billing: "api", how: (e as Error).message };
+  }
 }
 
 async function chromiumReady(): Promise<boolean> {
@@ -300,7 +439,8 @@ export function yagamiApi(): Plugin {
   const reserved = () => new Set(jobs.filter((j) => j.status === "running").map((j) => j.slug));
 
   async function preflight(kind: "text" | "scanned" | undefined) {
-    if (!credentials()) throw new HttpError(400, "no anthropic credentials — set ANTHROPIC_API_KEY where yagami runs (or run: ant auth login)");
+    const mm = await models();
+    if (!mm.ready) throw new HttpError(400, `no model access (${mm.provider}) — ${mm.how}`);
     const t = await tools();
     if (!t.poppler) throw new HttpError(400, "poppler is not installed — it reads pdfs (macOS: brew install poppler)");
     if (!t.chromium) throw new HttpError(400, "headless chromium is missing — run: npx playwright install chromium");
@@ -457,7 +597,80 @@ export function yagamiApi(): Plugin {
     const url = new URL(req.url ?? "/", "http://localhost");
     const p = url.pathname.replace(/\/+$/, "") || "/";
     const m = req.method ?? "GET";
-    if (m === "GET" && p === "/health") return send(res, 200, { credentials: credentials(), tools: await tools() });
+    // Only this site may change anything: other pages in the browser can send simple cross-site
+    // requests to 127.0.0.1, and a rebinding DNS name could reach it with another Host.
+    if (m !== "GET" && m !== "HEAD") {
+      const host = req.headers.host ?? "";
+      if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host)) throw new HttpError(403, "forbidden");
+      const origin = req.headers.origin;
+      if (origin && new URL(origin).host !== host) throw new HttpError(403, "forbidden");
+      if (req.headers["sec-fetch-site"] === "cross-site") throw new HttpError(403, "forbidden");
+    }
+    if (m === "GET" && p === "/models") return send(res, 200, await modelsView());
+    if (m === "POST" && p === "/models/use") {
+      const b = await readJson(req);
+      const id = b.provider === null ? null : String(b.provider);
+      if (id !== null && !PROVIDER_IDS.includes(id as ProviderName)) throw new HttpError(400, "unknown provider");
+      if (process.env.YAGAMI_PROVIDER) throw new HttpError(409, `YAGAMI_PROVIDER=${process.env.YAGAMI_PROVIDER} is set where yagami runs — unset it to choose here`);
+      const { saveProvider } = await import("./lib/settings");
+      const { resetProvider } = await import("./lib/claude");
+      saveProvider(id as ProviderName | null);
+      resetProvider();
+      return send(res, 200, await modelsView());
+    }
+    const km = /^\/models\/key\/(anthropic|openai)$/.exec(p);
+    if (km && (m === "PUT" || m === "DELETE")) {
+      const k = km[1] as "anthropic" | "openai";
+      const { keySource, saveKey } = await import("./lib/settings");
+      const { resetProvider } = await import("./lib/claude");
+      if (keySource(k) === "env") throw new HttpError(409, `${k === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"} is set where yagami runs — change it there`);
+      if (m === "PUT") {
+        const key = String((await readJson(req)).key ?? "").trim();
+        if (!key) throw new HttpError(400, "paste a key");
+        if (key.length > 400 || /\s/.test(key)) throw new HttpError(400, "that doesn't look like an api key");
+        await checkKey(k, key);
+        saveKey(k, key);
+      } else saveKey(k, null);
+      resetProvider();
+      return send(res, 200, await modelsView());
+    }
+    if (m === "POST" && p === "/models/login") {
+      const prov = String((await readJson(req)).provider ?? "");
+      if (prov !== "claude-sub" && prov !== "openai-sub") throw new HttpError(400, "unknown login");
+      // `claude auth login` may replace the stored login as it starts: never start one over a working login.
+      if (prov === "claude-sub" && (await modelsView()).providers.find((x) => x.id === "claude-sub")?.ready) throw new HttpError(409, "claude is already logged in with a subscription");
+      await startLogin(prov);
+      return send(res, 200, await modelsView());
+    }
+    if (m === "POST" && p === "/models/login/code") {
+      const code = String((await readJson(req)).code ?? "").trim();
+      if (!login || login.provider !== "claude-sub" || login.status !== "waiting") throw new HttpError(409, "no claude login is waiting for a code");
+      if (!code || code.length > 2000) throw new HttpError(400, "paste the code shown after signing in");
+      const l = login;
+      const seen = l.out.length;
+      delete l.codeError;
+      l.child.stdin?.write(code + "\n");
+      // The CLI exchanges the code and exits, or says the code is wrong and waits for another:
+      // wait for either so the answer says how it went.
+      for (let i = 0; i < 150 && l.status === "waiting"; i++) {
+        const said = l.out.slice(seen);
+        if (/invalid|error|failed|expired/i.test(said)) {
+          l.codeError = said.trim().split("\n").filter(Boolean)[0].toLowerCase().slice(0, 160);
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return send(res, 200, await modelsView());
+    }
+    if (m === "DELETE" && p === "/models/login") {
+      if (login?.status === "waiting") stopLogin(login);
+      login = null;
+      return send(res, 200, await modelsView());
+    }
+    if (m === "GET" && p === "/health") {
+      const mm = await models();
+      return send(res, 200, { credentials: mm.ready, provider: mm.provider, billing: mm.billing, ...(mm.how ? { how: mm.how } : {}), tools: await tools() });
+    }
     if (m === "POST" && p === "/uploads") return upload(req, res);
     if (m === "POST" && p === "/jobs") return createJob(req, res);
     if (m === "POST" && p === "/jobs/fix") return createFix(req, res);
@@ -483,6 +696,7 @@ export function yagamiApi(): Plugin {
   }
 
   const stopAll = () => {
+    if (login?.status === "waiting") stopLogin(login);
     for (const j of jobs) if (j.child && j.child.exitCode === null) j.child.kill("SIGINT");
   };
 

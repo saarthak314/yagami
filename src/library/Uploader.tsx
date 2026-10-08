@@ -3,7 +3,7 @@
 // on the yagami server; this only starts it and hands over to the progress view.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ApiError, estimate, isTouch, missingPrereqs, startBuild, upload, type Health, type UploadInfo } from "../lib/api";
+import { ApiError, costNote, isTouch, missingPrereqs, openModels, startBuild, upload, type Health, type UploadInfo } from "../lib/api";
 import { isNumbered, planFor } from "../lib/data";
 import { buildHash, hashFor } from "../lib/route";
 import { Cross, Spinner, UploadIcon } from "../ui/icons";
@@ -25,7 +25,7 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 export function blockedReason(health: Health | null | undefined, kind?: "text" | "scanned"): string | null {
   const m = missingPrereqs(health).filter((x) => !x.scansOnly || kind === "scanned");
   if (!m.length) return null;
-  return `can't build yet — missing ${m.map((x) => `${x.what} (${x.how})`).join(", ")}`;
+  return `can't build yet — missing ${m.map((x) => (x.models ? x.what : `${x.what} (${x.how})`)).join(", ")}`;
 }
 
 /**
@@ -48,7 +48,13 @@ function Prereqs({ health }: { health: Health | null | undefined }) {
       {m.map((x) => (
         <li key={x.what}>
           <span className="prereq-what">{x.what} missing{x.scansOnly ? " (only for scanned pdfs)" : ""}</span>
-          <code>{x.how}</code>
+          {x.models ? (
+            <button className="btn small" onClick={openModels}>
+              {x.how}
+            </button>
+          ) : (
+            <code>{x.how}</code>
+          )}
         </li>
       ))}
     </ul>
@@ -382,13 +388,16 @@ function Ready({
               : existing
                 ? "built chapters stay as they are. "
                 : ""}
-            {units > 0 || !multi
-              ? `building uses the anthropic api: ${estimate(units)} for ${multi ? plural(units, existing ? "new chapter" : "chapter") : "this paper"}. you can stop it any time.`
-              : "building uses the anthropic api — about $2 per chapter."}
+            {costNote(health, units > 0 || !multi ? Math.max(1, units) : 0, multi ? plural(units, existing ? "new chapter" : "chapter") : "this paper")}
           </p>
           {blocked && (
             <p className="upload-blocked" role="alert">
               {blocked}
+              {!health?.credentials && (
+                <button className="btn small" onClick={openModels}>
+                  connect a model
+                </button>
+              )}
             </p>
           )}
           {st.startError && (

@@ -7,7 +7,14 @@ import type { PipelineEvent } from "../../scripts/lib/events";
 export type { PipelineEvent };
 
 export interface Health {
+  /** The model provider is set up. */
   credentials: boolean;
+  /** anthropic · claude-sub · openai · openai-sub */
+  provider?: string;
+  /** Subscription providers cost no API dollars. */
+  billing?: "api" | "subscription";
+  /** How to set the provider up, when it isn't. */
+  how?: string;
   tools: { poppler: boolean; tesseract: boolean; chromium: boolean };
 }
 
@@ -150,19 +157,106 @@ export async function forgetJob(job: string): Promise<void> {
   await json(await fetch(`/api/jobs/${encodeURIComponent(job)}`, { method: "DELETE" }));
 }
 
+// --- model access (the header's model panel) -------------------------------------
+
+export type ProviderId = "anthropic" | "claude-sub" | "openai" | "openai-sub";
+export type SubProvider = "claude-sub" | "openai-sub";
+
+export interface ProviderState {
+  id: ProviderId;
+  ready: boolean;
+  /** Where its access comes from: an env var, a key saved from the site, or a CLI login. */
+  source: "env" | "saved" | "login" | null;
+  /** Last four characters of the key ("…a1b2"). */
+  hint: string | null;
+  billing: "api" | "subscription";
+}
+
+export interface LoginState {
+  provider: SubProvider;
+  /** The sign-in page to open. */
+  url: string | null;
+  /** Claude: waiting for the code shown after signing in. */
+  needsCode: boolean;
+  status: "waiting" | "done" | "failed";
+  error?: string;
+  /** The last pasted code was refused (the login still waits for another). */
+  codeError?: string;
+}
+
+export interface ModelsView {
+  active: ProviderId;
+  /** null: automatic (the first one set up). */
+  chosen: ProviderId | null;
+  /** YAGAMI_PROVIDER is set where yagami runs: choosing here is off. */
+  pinned: boolean;
+  providers: ProviderState[];
+  login: LoginState | null;
+}
+
+const send = (method: string, body?: unknown): RequestInit => ({
+  method,
+  ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+});
+
+export async function getModels(): Promise<ModelsView> {
+  return json(await fetch("/api/models"));
+}
+
+/** Use a provider (null: automatic). */
+export async function chooseProvider(provider: ProviderId | null): Promise<ModelsView> {
+  return json(await fetch("/api/models/use", send("POST", { provider })));
+}
+
+/** Check a pasted API key with the provider (free) and save it. */
+export async function saveKey(provider: "anthropic" | "openai", key: string): Promise<ModelsView> {
+  return json(await fetch(`/api/models/key/${provider}`, send("PUT", { key })));
+}
+
+export async function removeKey(provider: "anthropic" | "openai"): Promise<ModelsView> {
+  return json(await fetch(`/api/models/key/${provider}`, send("DELETE")));
+}
+
+/** Start a subscription login (the official CLI's flow); the view carries its sign-in url. */
+export async function startLogin(provider: SubProvider): Promise<ModelsView> {
+  return json(await fetch("/api/models/login", send("POST", { provider })));
+}
+
+/** Claude: the code shown after signing in. */
+export async function sendLoginCode(code: string): Promise<ModelsView> {
+  return json(await fetch("/api/models/login/code", send("POST", { code })));
+}
+
+/** Cancel a pending login (or clear a finished one). */
+export async function cancelLogin(): Promise<ModelsView> {
+  return json(await fetch("/api/models/login", send("DELETE")));
+}
+
+/** Window events: the model setup changed (refresh health) / open the model panel. */
+export const MODELS_CHANGED = "yagami:models";
+export const OPEN_MODELS = "yagami:open-models";
+export const openModels = () => window.dispatchEvent(new Event(OPEN_MODELS));
+
 /** Everything missing for building on this server, as short plain phrases (empty when ready). */
-export function missingPrereqs(h: Health | null | undefined): { what: string; how: string; scansOnly?: boolean }[] {
+export function missingPrereqs(h: Health | null | undefined): { what: string; how: string; scansOnly?: boolean; models?: boolean }[] {
   if (!h) return [];
-  const out: { what: string; how: string; scansOnly?: boolean }[] = [];
-  if (!h.credentials) out.push({ what: "anthropic credentials", how: "set ANTHROPIC_API_KEY where yagami runs, then restart it" });
+  const out: { what: string; how: string; scansOnly?: boolean; models?: boolean }[] = [];
+  if (!h.credentials) out.push({ what: "model access", how: "connect a model", models: true });
   if (!h.tools.poppler) out.push({ what: "poppler", how: "brew install poppler" });
   if (!h.tools.chromium) out.push({ what: "headless chromium", how: "npx playwright install chromium" });
   if (!h.tools.tesseract) out.push({ what: "tesseract", how: "brew install tesseract", scansOnly: true });
   return out;
 }
 
-/** Rough cost of building: about $2 per paper or chapter. */
-export const estimate = (units: number) => `about $${Math.max(1, units) * 2}`;
+/** Rough cost of building on an API key: about $2.50 per paper or chapter (Opus writes the demos). */
+export const estimate = (units: number) => `about $${Math.round(Math.max(1, units) * 2.5)}`;
+
+/** What building costs, in words, for the server's provider. */
+export function costNote(h: Health | null | undefined, units: number, what: string): string {
+  if (h?.billing === "subscription") return `building uses your ${h.provider === "openai-sub" ? "chatgpt" : "claude"} subscription for ${what}. you can stop it any time.`;
+  const api = h?.provider === "openai" ? "the openai api" : "the anthropic api";
+  return units > 0 ? `building uses ${api}: ${estimate(units)} for ${what}. you can stop it any time.` : `building uses ${api} — about $2.50 per chapter.`;
+}
 
 /** Touch devices: "choose", not "drop"; no keyboard hints. */
 export const isTouch = () => typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;

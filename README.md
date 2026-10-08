@@ -16,8 +16,19 @@ brew install poppler tesseract      # macOS
 npm install
 npx playwright install chromium     # used to check every demo
 npm link                            # puts `yagami` on your PATH
-export ANTHROPIC_API_KEY=...
 ```
+
+Then give it a model, any one of:
+
+| | setup | billing |
+|---|---|---|
+| Anthropic API | `export ANTHROPIC_API_KEY=...` | per token |
+| Claude subscription | `claude auth login` (Claude Code, with your claude.ai plan) | your plan |
+| OpenAI API | `export OPENAI_API_KEY=...` | per token |
+| ChatGPT subscription | `codex login` (Codex CLI, with your ChatGPT plan) | your plan |
+
+yagami uses the first of these it finds, in that order; `YAGAMI_PROVIDER=anthropic|claude-sub|openai|openai-sub` picks
+one explicitly. Subscriptions run the model through the official CLI on your machine (`claude -p`, `codex exec`).
 
 ## Usage
 
@@ -62,13 +73,19 @@ When it finishes, any demo that failed comes with the `yagami fix` command to re
    paragraphs and made in parallel: if it fits one of the built-in templates (function plot,
    simulation, vector diagram, matrix operations, random experiment, table, algorithm step-through) the model only
    writes its settings; otherwise it writes a small React component against a shared drawing kit.
-4. **Check.** Every demo is opened in headless Chromium at every step and checked by code first (errors, blank
-   stage, broken or wrong readouts against values the text pins down, clipped or overlapping labels); problems go
-   straight back to the model. A model review of one contact sheet runs only when the code checks can't judge it.
-   Demos stream through these stages independently, so the first ones are ready while others are still being made.
+4. **Check.** Every demo is opened in headless Chromium at every step and checked by code first: errors, a blank
+   stage, broken readouts, wrong values against the numbers the text pins down, clipped or overlapping labels,
+   controls that change nothing, and captions whose claims ("rises", "stays below") the readouts contradict.
+   Meanwhile a review compares the simulation's code with the paper's equations, rules and example, and a visual
+   review checks each step's caption against what the stage shows. Problems go back to the model; a demo that is
+   still wrong is marked in the reader. Demos stream through these stages independently, so the first ones are
+   ready while others are still being made.
 
-Model: Claude Sonnet 5.5 for every demo step (medium effort for first drafts, low for small fixes). A short paper
-typically takes 20–30 seconds and about 20 cents; spend is shown live and logged to `work/usage.jsonl`.
+Models: with Claude, Opus 5.5 writes the demos and Sonnet 5.5 plans and reviews (medium effort, low for small
+fixes). In an audit of 10 papers against their text, Opus-written demos were 74% fully correct and 3% wrong. A paper
+takes 2–4 minutes and $1–4 on an API key (about $2.40 on average); spend is shown live and logged to
+`work/usage.jsonl`. With OpenAI, `gpt-5.5` does everything (`YAGAMI_OPENAI_MODEL` to change it). Per-step
+overrides: `YAGAMI_BUILD_MODEL`, `YAGAMI_REVIEW_MODEL`, `YAGAMI_PLAN_MODEL` (and `_EFFORT`).
 
 ## Layout
 
@@ -82,5 +99,5 @@ src/demo/reference/           hand-written example demos the generator follows
 
 Your books stay local and are git-ignored: `books/<slug>/` (the PDF and its config), `src/demos/<slug>/` (the
 generated demos), `public/books/` (page images) and `work/` (caches). Book text is only used as model input for
-planning; captions and demo specs are written fresh. The site shows page images made from your PDFs; only publish it
+planning; captions and demo specs are written fresh. It is sent to the model provider you choose. The site shows page images made from your PDFs; only publish it
 if you have the rights to that material.

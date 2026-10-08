@@ -1,14 +1,32 @@
-// Shared Claude client for every pipeline step. One place for models, effort,
-// refusal fallbacks, streaming, JSON outputs and cost logging.
+// Shared model client for every pipeline step. One place for providers, models, effort,
+// refusal fallbacks, streaming, JSON outputs and cost logging. Calls go to the Anthropic API by
+// default; other providers (a Claude subscription, the OpenAI API, a ChatGPT subscription) live in
+// ./providers and take the same Anthropic-format requests (see providers/types.ts).
 
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import type { z } from "zod";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { type Provider, type ProviderId, type ProviderResult, ProviderTransientError } from "./providers/types";
+import { applySettings, keyHint, keySource, readSettings } from "./settings";
 
-export const client = new Anthropic({ maxRetries: 4 });
+// Keys pasted in the site's model panel (~/.config/yagami/settings.json) apply unless the environment sets them.
+applySettings();
+
+/** The Anthropic API client; made on first use, so a key saved after startup is picked up. */
+let anthropicClient: Anthropic | null = null;
+let anthropicKeyUsed: string | undefined;
+function anthropic(): Anthropic {
+  if (!anthropicClient || anthropicKeyUsed !== process.env.ANTHROPIC_API_KEY) {
+    anthropicKeyUsed = process.env.ANTHROPIC_API_KEY;
+    anthropicClient = new Anthropic({ maxRetries: 4 });
+  }
+  return anthropicClient;
+}
 
 export const MODELS = {
   opus: "claude-opus-5-5",
@@ -17,8 +35,111 @@ export const MODELS = {
   haiku: "claude-haiku-4-5",
 } as const;
 
-export type Model = (typeof MODELS)[keyof typeof MODELS];
+/** A model id: one of MODELS for Claude providers, an OpenAI model id (e.g. "gpt-5.5") for OpenAI ones. */
+export type Model = string;
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Default OpenAI model for every role (YAGAMI_OPENAI_MODEL, or YAGAMI_<GROUP>_MODEL per group). */
+export const OPENAI_DEFAULT = "gpt-5.5";
+
+const PROVIDERS: ProviderId[] = ["anthropic", "claude-sub", "openai", "openai-sub"];
+let resolved: ProviderId | null = null;
+
+/** Claude Code is logged in with a Claude subscription (not an API key). */
+function claudeSubLoggedIn(): boolean {
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) return true;
+  try {
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    const out = execFileSync("claude", ["auth", "status"], { env, encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"] });
+    const st = JSON.parse(out) as { loggedIn?: boolean; authMethod?: string };
+    return !!st.loggedIn && st.authMethod !== "api_key";
+  } catch {
+    return false;
+  }
+}
+
+/** Codex is logged in with a ChatGPT account. */
+function codexChatGpt(): boolean {
+  try {
+    const home = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+    const a = JSON.parse(fs.readFileSync(path.join(home, "auth.json"), "utf8")) as { auth_mode?: string; tokens?: unknown };
+    return a.auth_mode === "chatgpt" && !!a.tokens;
+  } catch {
+    return false;
+  }
+}
+
+function anthropicKey(): boolean {
+  const profile = path.join(os.homedir(), ".config", "anthropic", "profiles");
+  return !!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || (fs.existsSync(profile) && fs.readdirSync(profile).length > 0));
+}
+
+/**
+ * The provider every call goes to: YAGAMI_PROVIDER when set, else the one chosen in the site's model
+ * panel, else the first one set up of an Anthropic API key, a Claude subscription, an OpenAI API key
+ * and a ChatGPT subscription.
+ */
+export function activeProvider(): ProviderId {
+  if (resolved) return resolved;
+  const want = (process.env.YAGAMI_PROVIDER ?? readSettings().provider) as ProviderId | undefined;
+  if (want && !PROVIDERS.includes(want)) throw new Error(`unknown YAGAMI_PROVIDER "${want}" (one of: ${PROVIDERS.join(", ")})`);
+  resolved = want ?? (anthropicKey() ? "anthropic" : claudeSubLoggedIn() ? "claude-sub" : process.env.OPENAI_API_KEY ? "openai" : codexChatGpt() ? "openai-sub" : "anthropic");
+  return resolved;
+}
+
+/** Forget the resolved provider (after the settings or a login changed). */
+export function resetProvider(): void {
+  resolved = null;
+}
+
+/** Every provider: whether it is set up, where its access comes from, and which one is active. */
+export function providersOverview(): {
+  active: ProviderId;
+  chosen: ProviderId | null;
+  /** YAGAMI_PROVIDER pins the provider; the panel can't change it. */
+  pinned: boolean;
+  providers: { id: ProviderId; ready: boolean; source: "env" | "saved" | "login" | null; hint: string | null; billing: "api" | "subscription" }[];
+} {
+  const pinned = !!process.env.YAGAMI_PROVIDER;
+  const claudeSub = claudeSubLoggedIn();
+  const chatgpt = codexChatGpt();
+  return {
+    active: activeProvider(),
+    chosen: (process.env.YAGAMI_PROVIDER as ProviderId | undefined) ?? readSettings().provider ?? null,
+    pinned,
+    providers: [
+      { id: "anthropic", ready: anthropicKey(), source: keySource("anthropic") ?? (anthropicKey() ? "env" : null), hint: keyHint("anthropic"), billing: "api" },
+      { id: "claude-sub", ready: claudeSub, source: claudeSub ? "login" : null, hint: null, billing: "subscription" },
+      { id: "openai", ready: !!process.env.OPENAI_API_KEY, source: keySource("openai"), hint: keyHint("openai"), billing: "api" },
+      { id: "openai-sub", ready: chatgpt, source: chatgpt ? "login" : null, hint: null, billing: "subscription" },
+    ],
+  };
+}
+
+/** Whether the active provider is set up, and how to set it up when it isn't. */
+export function providerStatus(): { provider: ProviderId; ready: boolean; how?: string } {
+  const provider = activeProvider();
+  switch (provider) {
+    case "anthropic":
+      return anthropicKey() ? { provider, ready: true } : { provider, ready: false, how: "set ANTHROPIC_API_KEY, or log in to a Claude subscription (claude auth login), or set OPENAI_API_KEY, or log in to ChatGPT (codex login)" };
+    case "claude-sub":
+      return claudeSubLoggedIn() ? { provider, ready: true } : { provider, ready: false, how: "log in to Claude Code with your Claude subscription: claude auth login" };
+    case "openai":
+      return process.env.OPENAI_API_KEY ? { provider, ready: true } : { provider, ready: false, how: "set OPENAI_API_KEY" };
+    case "openai-sub":
+      return codexChatGpt() ? { provider, ready: true } : { provider, ready: false, how: "log in to Codex with your ChatGPT account: codex login" };
+  }
+}
+
+const isOpenAi = (p: ProviderId) => p === "openai" || p === "openai-sub";
+
+/** Billing of the active provider: subscription calls cost no API dollars. */
+export function billing(): "api" | "subscription" {
+  const p = activeProvider();
+  return p === "claude-sub" || p === "openai-sub" ? "subscription" : "api";
+}
 
 /** Pipeline roles that call a model. */
 export type Role = "outline" | "plan" | "repair" | "build" | "template" | "review" | "domain";
@@ -30,19 +151,26 @@ const GROUP_FALLBACK: Record<string, string> = { TEMPLATE: "BUILD" };
 const isEffort = (e: string | undefined): e is Effort => e === "low" || e === "medium" || e === "high" || e === "xhigh" || e === "max";
 
 /**
- * Model and effort for a role. Every demo step (outline, spec + code, templates, fixes,
- * reviews) runs on Sonnet 5.5 at medium effort — the user's choice for time and cost.
- * Experiments can override: YAGAMI_MODEL / YAGAMI_EFFORT for all roles, or per group
- * YAGAMI_PLAN_* (outline, legacy plan, repair), YAGAMI_BUILD_* (spec + code, templates),
- * YAGAMI_REVIEW_*, YAGAMI_DOMAIN_* (subject detection, default low effort).
+ * Model and effort for a role, at medium effort by default.
+ * - Claude providers: Opus 5.5 writes the demos (spec + code, templates and their fixes); planning,
+ *   reviews and subject detection run on Sonnet 5.5. Audited on 10 papers, Opus-written demos were
+ *   74% fully correct and 3% wrong, against 42% and 17% for Sonnet, for about 1.5× the cost.
+ * - OpenAI providers: YAGAMI_OPENAI_MODEL (default gpt-5.5) for every role.
+ * Overrides: YAGAMI_MODEL / YAGAMI_EFFORT for all roles, or per group YAGAMI_PLAN_* (outline,
+ * legacy plan, repair), YAGAMI_BUILD_* (spec + code, templates), YAGAMI_TEMPLATE_*, YAGAMI_REVIEW_*,
+ * YAGAMI_DOMAIN_* (subject detection, default low effort). Models: opus, sonnet, haiku or a full id.
  */
 export function roleModel(role: Role): { model: Model; effort: Effort } {
   const g = ROLE_GROUP[role];
   const fb = GROUP_FALLBACK[g];
   const m = process.env[`YAGAMI_${g}_MODEL`] ?? (fb ? process.env[`YAGAMI_${fb}_MODEL`] : undefined) ?? process.env.YAGAMI_MODEL;
   const e = process.env[`YAGAMI_${g}_EFFORT`] ?? (fb ? process.env[`YAGAMI_${fb}_EFFORT`] : undefined) ?? process.env.YAGAMI_EFFORT;
-  const model = m === "opus" || m === MODELS.opus ? MODELS.opus : m === "haiku" || m === MODELS.haiku ? MODELS.haiku : MODELS.sonnet;
-  return { model, effort: isEffort(e) ? e : role === "domain" ? "low" : "medium" };
+  const effort: Effort = isEffort(e) ? e : role === "domain" ? "low" : "medium";
+  if (isOpenAi(activeProvider())) return { model: m && !/^(opus|sonnet|haiku|claude-)/.test(m) ? m : (process.env.YAGAMI_OPENAI_MODEL ?? OPENAI_DEFAULT), effort };
+  const builds = g === "BUILD" || g === "TEMPLATE";
+  const model =
+    m === "opus" || m === MODELS.opus ? MODELS.opus : m === "haiku" || m === MODELS.haiku ? MODELS.haiku : m === "sonnet" || m === MODELS.sonnet ? MODELS.sonnet : builds ? MODELS.opus : MODELS.sonnet;
+  return { model, effort };
 }
 
 /**
@@ -57,8 +185,24 @@ export function fixEffort(): Effort {
 /** Haiku 4.5 takes no effort parameter and no adaptive thinking (thinking is simply omitted). */
 const isHaiku = (m: Model) => m === MODELS.haiku;
 
+/** The provider implementation (loaded on first use; the Anthropic API is built in). */
+const loaded = new Map<ProviderId, Promise<Provider>>();
+function providerImpl(p: ProviderId): Promise<Provider> {
+  let got = loaded.get(p);
+  if (!got) {
+    got =
+      p === "claude-sub"
+        ? import("./providers/claude-sub").then((m) => m.claudeSub)
+        : p === "openai"
+          ? import("./providers/openai-api").then((m) => m.openaiApi)
+          : import("./providers/openai-sub").then((m) => m.openaiSub);
+    loaded.set(p, got);
+  }
+  return got;
+}
+
 // $ per million tokens: [input, output, cache read, cache write (5m)]; a 1-hour cache write is 2× input.
-const PRICES: Record<Model, [number, number, number, number]> = {
+const PRICES: Record<string, [number, number, number, number]> = {
   "claude-opus-5-5": [4, 20, 0.2, 5],
   "claude-sonnet-5-5": [2, 10, 0.2, 2.5],
   "claude-haiku-4-5": [1, 5, 0.1, 1.25],
@@ -198,16 +342,66 @@ async function run(opts: CallOpts, format?: ReturnType<typeof betaZodOutputForma
       return await runOnce(opts, format);
     } catch (e) {
       const wait = RECONNECT_WAITS_MS[attempt];
-      if (!(e instanceof Anthropic.APIConnectionError || e instanceof StalledError) || wait === undefined || opts.signal?.aborted) throw e;
+      if (!(e instanceof Anthropic.APIConnectionError || e instanceof StalledError || e instanceof ProviderTransientError) || wait === undefined || opts.signal?.aborted) throw e;
       await new Promise((r) => setTimeout(r, wait));
     }
   }
 }
 
+/** A call through another provider: its reply as an Anthropic-shaped message, its usage logged. */
+async function runProvider(p: ProviderId, opts: CallOpts, format?: ReturnType<typeof betaZodOutputFormat>): Promise<Anthropic.Beta.BetaMessage> {
+  const impl = await providerImpl(p);
+  const system = typeof opts.system === "string" ? opts.system : (opts.system ?? []).map((b) => b.text).join("\n\n");
+  const t0 = Date.now();
+  let r: ProviderResult;
+  try {
+    r = await impl({ model: opts.model, effort: opts.effort, label: opts.label, system, messages: opts.messages, maxTokens: opts.maxTokens ?? 64000, schema: format?.schema as Record<string, unknown> | undefined, signal: opts.signal });
+  } catch (e) {
+    if (opts.signal?.aborted) throw new AbortedError(`${opts.label}: aborted`);
+    throw e;
+  }
+  const end = Date.now();
+  fs.mkdirSync(path.dirname(USAGE_LOG), { recursive: true });
+  fs.appendFileSync(
+    USAGE_LOG,
+    JSON.stringify({
+      at: new Date(end).toISOString(),
+      label: opts.label,
+      model: r.model,
+      provider: p,
+      billing: r.billing,
+      input: r.usage.input,
+      output: r.usage.output,
+      cacheRead: r.usage.cacheRead,
+      cacheWrite: r.usage.cacheWrite,
+      cost: Number(r.cost.toFixed(5)),
+      startedAt: new Date(t0).toISOString(),
+      ms: end - t0,
+      ...(r.ttftMs ? { ttftMs: r.ttftMs } : {}),
+    }) + "\n",
+  );
+  for (const fn of costListeners) fn(r.cost, opts.label);
+  if (r.stopReason === "refusal") throw new RefusalError(`${opts.label}: refused`);
+  if (r.stopReason === "max_tokens") throw new Error(`${opts.label}: hit max_tokens`);
+  if (opts.onText) opts.onText(r.text);
+  return {
+    id: `${p}-${t0}`,
+    type: "message",
+    role: "assistant",
+    model: r.model,
+    content: [{ type: "text", text: r.text, citations: null }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: r.usage.input, output_tokens: r.usage.output, cache_read_input_tokens: r.usage.cacheRead ?? 0, cache_creation_input_tokens: r.usage.cacheWrite ?? 0 },
+  } as unknown as Anthropic.Beta.BetaMessage;
+}
+
 async function runOnce(opts: CallOpts, format?: ReturnType<typeof betaZodOutputFormat>) {
   if (opts.signal?.aborted) throw new AbortedError(`${opts.label}: aborted before it started`);
+  const p = activeProvider();
+  if (p !== "anthropic") return runProvider(p, opts, format);
   const t0 = Date.now();
-  const stream = client.beta.messages.stream({
+  const stream = anthropic().beta.messages.stream({
     model: opts.model,
     max_tokens: opts.maxTokens ?? (isHaiku(opts.model) ? 32000 : 64000),
     ...modelParams(opts.model, opts.effort, format),
@@ -279,16 +473,17 @@ async function runOnce(opts: CallOpts, format?: ReturnType<typeof betaZodOutputF
  * Best effort: failures are swallowed (the real requests then simply write the cache).
  */
 export async function prewarm(opts: { model: Model; effort: Effort; label: string; system: Anthropic.Beta.BetaTextBlockParam[] }): Promise<void> {
+  if (activeProvider() !== "anthropic") return;
   const oneHour = opts.system.some((b) => (b.cache_control as { ttl?: string } | undefined)?.ttl === "1h");
   const key = crypto
     .createHash("sha1")
     // The API host is part of the key: a warm against a mock or another endpoint says nothing about this one.
-    .update(`${client.baseURL}\0${opts.model}\0${isHaiku(opts.model) ? "" : opts.effort}\0${opts.system.map((b) => b.text).join("\0")}`)
+    .update(`${anthropic().baseURL}\0${opts.model}\0${isHaiku(opts.model) ? "" : opts.effort}\0${opts.system.map((b) => b.text).join("\0")}`)
     .digest("hex")
     .slice(0, 20);
   if (oneHour && warmedRecently(key)) return;
   try {
-    const message = await client.beta.messages.create({
+    const message = await anthropic().beta.messages.create({
       model: opts.model,
       max_tokens: 0,
       ...(isHaiku(opts.model) ? {} : { thinking: { type: "adaptive" as const }, output_config: { effort: opts.effort } }),
